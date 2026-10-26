@@ -8,7 +8,9 @@ const Ticket = require('./models/Ticket');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
-app.use(cors());
+app.get('/', (req, res) => {
+  res.send('Warehouse Management API is running!');
+});
 
 // Kết nối MongoDB Atlas
 const MONGO_URI = process.env.MONGO_URI;
