@@ -8,6 +8,17 @@ const Ticket = require('./models/Ticket');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+app.use(cors({
+  origin: [
+    'http://localhost:5173',
+    'https://p2pwms.vercel.app'
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+app.use(express.json({ limit: '10mb' }));
+
 app.get('/', (req, res) => {
   res.send('Warehouse Management API is running!');
 });
