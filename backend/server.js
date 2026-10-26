@@ -23,10 +23,30 @@ mongoose.connect(MONGO_URI)
 // 1. Lấy toàn bộ danh sách phiếu kho
 app.get('/api/tickets', async (req, res) => {
   try {
-    const tickets = await Ticket.find().sort({ createdAt: -1 });
-    res.json(tickets);
+    console.log('📥 Nhận yêu cầu lấy danh sách phiếu kho');
+    console.log('MongoDB readyState:', mongoose.connection.readyState);
+
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({
+        error: 'MongoDB chưa kết nối',
+        readyState: mongoose.connection.readyState
+      });
+    }
+
+    const tickets = await Ticket.find({})
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+
+    console.log(`✅ Đã lấy ${tickets.length} phiếu kho`);
+
+    return res.status(200).json(tickets);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('❌ LỖI GET /api/tickets:', err);
+
+    return res.status(500).json({
+      error: err.message || 'Lỗi không xác định khi lấy phiếu kho'
+    });
   }
 });
 
