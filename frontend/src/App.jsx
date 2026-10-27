@@ -38,6 +38,11 @@ export default function App() {
   const [stocktakeForm, setStocktakeForm] = useState({ location: 'Toàn kho', note: '' });
   const [stocktakeCounts, setStocktakeCounts] = useState({});
   const [receiverConfirmed, setReceiverConfirmed] = useState(false);
+  const [returnAssetModal, setReturnAssetModal] = useState(null);
+  const [returnAssetForm, setReturnAssetForm] = useState({ returnedBy: '', receivedBy: '', condition: 'Tốt', note: '' });
+  const [returnAssetLoading, setReturnAssetLoading] = useState(false);
+  const [returnHistorySearch, setReturnHistorySearch] = useState('');
+  const [returnHistoryCondition, setReturnHistoryCondition] = useState('ALL');
   const [jobForm, setJobForm] = useState({ jobCode: '', name: '', client: '', eventLocation: '', startDate: '', endDate: '', owner: '' });
   const [assetForm, setAssetForm] = useState({ assetCode: '', name: '', sku: '', serialNumber: '', category: 'Thiết bị', location: 'Kho P2P' });
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
@@ -166,7 +171,7 @@ export default function App() {
   }, [currentUser, activeTab]);
 
   useEffect(() => {
-    if (!currentUser || !['jobs', 'outbound', 'overview', 'stocktake'].includes(activeTab)) return;
+    if (!currentUser || !['jobs', 'outbound', 'overview', 'stocktake', 'returns'].includes(activeTab)) return;
     Promise.all([fetchJobs(), fetchAssets()]).then(([jobData, assetData]) => { setJobs(jobData); setAssets(assetData); }).catch(err => showNotification(err.response?.data?.error || 'Không tải được Job/thiết bị.', 'error'));
     if (activeTab === 'stocktake') fetchStocktakes().then(setStocktakes).catch(err => showNotification(err.response?.data?.error || 'Không tải được lịch sử kiểm kê.', 'error')); 
   }, [currentUser, activeTab]);
@@ -181,17 +186,37 @@ export default function App() {
     try { const created = await createAsset(assetForm); setAssets(prev => [created, ...prev]); setAssetForm({ assetCode: '', name: '', sku: '', serialNumber: '', category: 'Thiết bị', location: 'Kho P2P' }); showNotification('Đã đăng ký thiết bị.'); }
     catch (err) { showNotification(err.response?.data?.error || 'Không đăng ký được thiết bị.', 'error'); }
   };
-  const handleAssetReturn = async (asset) => {
-    const returnedBy = window.prompt('Người bàn giao thiết bị về kho là ai?', '') || '';
-    if (returnedBy.trim().length < 2) { showNotification('Cần nhập người bàn giao thiết bị về kho.', 'error'); return; }
-    const receivedBy = window.prompt('Nhân sự kho xác nhận nhận lại thiết bị là ai?', currentUser?.fullName || '') || '';
-    if (receivedBy.trim().length < 2) { showNotification('Cần nhập người xác nhận nhận lại thiết bị.', 'error'); return; }
-    const condition = window.prompt('Tình trạng khi hoàn kho: Tốt, Cần kiểm tra, hoặc Hư hỏng', 'Tốt');
-    if (!condition) return;
-    if (!['Tốt', 'Cần kiểm tra', 'Hư hỏng'].includes(condition.trim())) { showNotification('Tình trạng không hợp lệ.', 'error'); return; }
-    const note = window.prompt('Ghi chú tình trạng / phụ kiện thiếu (nếu có):', '') || '';
-    try { const updated = await returnAsset(asset._id, { condition: condition.trim(), returnedBy: returnedBy.trim(), receivedBy: receivedBy.trim(), note }); setAssets(prev => prev.map(a => a._id === asset._id ? { ...a, ...updated, currentJob: null } : a)); showNotification('Đã lưu xác nhận thu hồi thiết bị và lịch sử bàn giao.'); }
-    catch (err) { showNotification(err.response?.data?.error || 'Không hoàn kho được.', 'error'); }
+  const handleAssetReturn = (asset) => {
+    setReturnAssetForm({ returnedBy: '', receivedBy: currentUser?.fullName || '', condition: 'Tốt', note: '' });
+    setReturnAssetModal(asset);
+  };
+
+  const handleSubmitAssetReturn = async (e) => {
+    e.preventDefault();
+    if (!returnAssetModal || returnAssetLoading) return;
+    const returnedBy = returnAssetForm.returnedBy.trim();
+    const receivedBy = returnAssetForm.receivedBy.trim();
+    if (returnedBy.length < 2 || receivedBy.length < 2) {
+      showNotification('Vui lòng nhập đầy đủ người bàn giao và người nhận lại thiết bị.', 'error');
+      return;
+    }
+    setReturnAssetLoading(true);
+    try {
+      const updated = await returnAsset(returnAssetModal._id, {
+        condition: returnAssetForm.condition,
+        returnedBy,
+        receivedBy,
+        note: returnAssetForm.note.trim()
+      });
+      setAssets(prev => prev.map(a => a._id === returnAssetModal._id ? { ...a, ...updated, currentJob: null } : a));
+      setReturnAssetModal(null);
+      setReturnAssetForm({ returnedBy: '', receivedBy: '', condition: 'Tốt', note: '' });
+      showNotification('Đã hoàn kho thiết bị và lưu lịch sử bàn giao.');
+    } catch (err) {
+      showNotification(err.response?.data?.error || 'Không hoàn kho được. Vui lòng kiểm tra lại và thử lại.', 'error');
+    } finally {
+      setReturnAssetLoading(false);
+    }
   };
 
   const [activePhotoModal, setActivePhotoModal] = useState(null);
@@ -769,7 +794,12 @@ const handleCreateStocktake = async (e) => {
             </button>
 
             <button onClick={() => { setActiveTab('stocktake'); setMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all ${activeTab === 'stocktake' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}>
-              <CheckCircle2 className="w-4 h-4 text-emerald-400" /><span>Kiểm kê & Đối soát</span>
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" /><span>Kiểm kê chi tiết & Đối soát</span>
+            </button>
+
+            <button onClick={() => { setActiveTab('returns'); setMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all ${activeTab === 'returns' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}>
+              <RotateCcw className="w-4 h-4 text-emerald-400" /><span>Hoàn kho & Lịch sử</span>
+              {assets.some(a => a.status === 'assigned') && <span className="ml-auto rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-bold text-slate-950">{assets.filter(a => a.status === 'assigned').length}</span>}
             </button>
 
             <button onClick={() => { setActiveTab('jobs'); setMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all ${activeTab === 'jobs' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}>
@@ -824,7 +854,8 @@ const handleCreateStocktake = async (e) => {
               {activeTab === 'inventory' && '📦 Danh Mục Quản Lý Tồn Kho P2P'}
               {activeTab === 'logs' && '📋 Nhật Ký Giao Nhận P2P & Audit Trail'}
               {activeTab === 'jobs' && '🗓️ Quản Lý Job/Event & Thiết Bị Theo Mã Riêng'}
-              {activeTab === 'stocktake' && '🧾 Kiểm Kê & Đối Soát Tồn Kho'}
+              {activeTab === 'stocktake' && '🧾 Kiểm Kê Chi Tiết & Đối Soát Tồn Kho'}
+              {activeTab === 'returns' && '↩️ Hoàn Kho & Lịch Sử Thiết Bị'}
               {activeTab === 'users' && '🛡️ Quản Lý Tài Khoản & Phân Quyền'}
             </h2>
             <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
@@ -1691,6 +1722,7 @@ const handleCreateStocktake = async (e) => {
 
         {activeTab === 'stocktake' && (
           <div className="space-y-5">
+            <div className={`rounded-2xl border p-4 ${darkMode ? 'border-indigo-900 bg-indigo-950/30' : 'border-indigo-200 bg-indigo-50'}`}><div className="flex items-start gap-3"><CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-indigo-500"/><div><h3 className="font-bold">Kiểm kê chi tiết nằm tại đây</h3><p className="mt-1 text-sm text-slate-500">Tạo biên bản theo khu vực, nhập số lượng thực tế từng SKU, xem chênh lệch từng dòng và mở lịch sử để xem chi tiết. Biên bản chỉ ghi nhận đối soát, không tự điều chỉnh tồn kho.</p></div></div></div>
             <form onSubmit={handleCreateStocktake} className={`rounded-2xl border p-5 ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'}`}>
               <div className="flex flex-wrap items-start justify-between gap-3 mb-4"><div><h3 className="font-bold text-lg">Tạo biên bản kiểm kê</h3><p className="text-xs text-slate-500 mt-1">Điền số lượng thực tế từng SKU. Dòng chưa sửa sẽ mặc định bằng tồn hệ thống.</p></div><span className="text-xs rounded-full bg-indigo-500/10 text-indigo-500 px-3 py-1">{stocktakeInventory.length} SKU</span></div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4"><input value={stocktakeForm.location} onChange={e=>setStocktakeForm(v=>({...v,location:e.target.value}))} placeholder="Khu vực kiểm kê" className="rounded-xl border p-3 bg-transparent text-sm"/><input value={stocktakeForm.note} onChange={e=>setStocktakeForm(v=>({...v,note:e.target.value}))} placeholder="Ghi chú / lý do kiểm kê" className="rounded-xl border p-3 bg-transparent text-sm"/></div>
@@ -1762,6 +1794,45 @@ const handleCreateStocktake = async (e) => {
                 ))}
               </div>
             </div>
+          </div>
+        )}
+
+        {activeTab === 'returns' && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className={`rounded-2xl border p-4 ${darkMode ? 'border-slate-700 bg-slate-800/60' : 'border-slate-200 bg-white'}`}>
+                <p className="text-xs text-slate-500">Thiết bị đang ở Job/Event</p>
+                <p className="mt-2 text-2xl font-extrabold text-amber-500">{assets.filter(a => a.status === 'assigned').length}</p>
+                <p className="mt-1 text-xs text-slate-500">Có thể chọn để hoàn kho bên dưới</p>
+              </div>
+              <div className={`rounded-2xl border p-4 ${darkMode ? 'border-slate-700 bg-slate-800/60' : 'border-slate-200 bg-white'}`}>
+                <p className="text-xs text-slate-500">Đã hoàn kho (lượt lưu lịch sử)</p>
+                <p className="mt-2 text-2xl font-extrabold text-emerald-500">{assets.reduce((sum, a) => sum + (Array.isArray(a.returnLogs) ? a.returnLogs.length : 0), 0)}</p>
+                <p className="mt-1 text-xs text-slate-500">Lịch sử được lưu theo từng mã tài sản</p>
+              </div>
+              <div className={`rounded-2xl border p-4 ${darkMode ? 'border-slate-700 bg-slate-800/60' : 'border-slate-200 bg-white'}`}>
+                <p className="text-xs text-slate-500">Thiết bị cần xử lý</p>
+                <p className="mt-2 text-2xl font-extrabold text-rose-500">{assets.filter(a => a.status === 'maintenance' || a.condition === 'Cần kiểm tra' || a.condition === 'Hư hỏng').length}</p>
+                <p className="mt-1 text-xs text-slate-500">Bảo trì, hư hỏng hoặc cần kiểm tra</p>
+              </div>
+            </div>
+
+            <section className={`rounded-2xl border p-5 ${darkMode ? 'border-slate-700 bg-slate-800/60' : 'border-slate-200 bg-white'}`}>
+              <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                <div><h3 className="flex items-center gap-2 text-lg font-bold"><RotateCcw className="h-5 w-5 text-emerald-500" /> Danh sách cần hoàn kho</h3><p className="mt-1 text-xs text-slate-500">Chọn nút Hoàn kho tại đúng thiết bị. Thiết bị sẽ được gỡ khỏi Job sau khi lưu thành công.</p></div>
+                <button type="button" onClick={() => fetchAssets().then(setAssets).catch(err => showNotification(err.response?.data?.error || 'Không tải được thiết bị.', 'error'))} className="inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold"><RefreshCw className="h-3.5 w-3.5" /> Làm mới</button>
+              </div>
+              <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr className="border-b text-xs text-slate-500"><th className="p-3">Mã tài sản</th><th className="p-3">Thiết bị</th><th className="p-3">SKU</th><th className="p-3">Job/Event</th><th className="p-3">Tình trạng hiện tại</th><th className="p-3">Thao tác</th></tr></thead><tbody>
+                {assets.filter(a => a.status === 'assigned').map(a => <tr key={a._id} className="border-b border-slate-200/20"><td className="p-3 font-mono font-semibold">{a.assetCode}</td><td className="p-3">{a.name}</td><td className="p-3 font-mono">{a.sku}</td><td className="p-3">{a.currentJob?.jobCode || '—'}<span className="block text-xs text-slate-500">{a.currentJob?.name || ''}</span></td><td className="p-3">{a.condition || '—'}</td><td className="p-3"><button type="button" onClick={() => handleAssetReturn(a)} className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700"><RotateCcw className="h-3.5 w-3.5" /> Hoàn kho</button></td></tr>)}
+                {assets.filter(a => a.status === 'assigned').length === 0 && <tr><td colSpan="6" className="p-8 text-center text-sm text-slate-500">Không có thiết bị nào đang ở Job cần hoàn kho.</td></tr>}
+              </tbody></table></div>
+            </section>
+
+            <section className={`rounded-2xl border p-5 ${darkMode ? 'border-slate-700 bg-slate-800/60' : 'border-slate-200 bg-white'}`}>
+              <div className="mb-4 flex flex-wrap items-start justify-between gap-3"><div><h3 className="flex items-center gap-2 text-lg font-bold"><History className="h-5 w-5 text-indigo-500" /> Lịch sử hoàn kho chi tiết</h3><p className="mt-1 text-xs text-slate-500">Mỗi dòng là một lần hoàn kho đã lưu trong lịch sử của tài sản.</p></div><span className="rounded-full bg-indigo-500/10 px-3 py-1 text-xs font-semibold text-indigo-500">{assets.reduce((sum, a) => sum + (Array.isArray(a.returnLogs) ? a.returnLogs.length : 0), 0)} lượt</span></div>
+              <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_220px]"><input value={returnHistorySearch} onChange={e => setReturnHistorySearch(e.target.value)} placeholder="Tìm mã tài sản, tên thiết bị, Job, người giao/nhận..." className={`w-full rounded-xl border px-3 py-2.5 text-sm ${darkMode ? 'border-slate-700 bg-slate-900' : 'border-slate-300 bg-white'}`} /><select value={returnHistoryCondition} onChange={e => setReturnHistoryCondition(e.target.value)} className={`rounded-xl border px-3 py-2.5 text-sm ${darkMode ? 'border-slate-700 bg-slate-900' : 'border-slate-300 bg-white'}`}><option value="ALL">Tất cả tình trạng</option><option value="Tốt">Tốt</option><option value="Cần kiểm tra">Cần kiểm tra</option><option value="Hư hỏng">Hư hỏng</option></select></div>
+              {(() => { const rows = assets.flatMap(a => (Array.isArray(a.returnLogs) ? a.returnLogs : []).map((log, idx) => ({ ...log, _key: `${a._id}-${idx}`, assetCode: a.assetCode, assetName: a.name, sku: a.sku, serialNumber: a.serialNumber, location: a.location, executorName: log.executorId?.fullName || log.executorId?.email || '—' }))).filter(row => { const q = returnHistorySearch.trim().toLowerCase(); const haystack = [row.assetCode,row.assetName,row.sku,row.jobCode,row.returnedBy,row.receivedBy,row.note,row.executorName].join(' ').toLowerCase(); return (!q || haystack.includes(q)) && (returnHistoryCondition === 'ALL' || row.condition === returnHistoryCondition); }).sort((a,b) => new Date(b.timestamp || 0)-new Date(a.timestamp || 0)); return rows.length ? <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr className="border-b text-xs text-slate-500"><th className="p-3">Thời gian hoàn</th><th className="p-3">Tài sản</th><th className="p-3">Job/Event</th><th className="p-3">Người giao về</th><th className="p-3">Kho nhận</th><th className="p-3">Tình trạng</th><th className="p-3">Ghi chú / phụ kiện</th><th className="p-3">Người ghi nhận</th></tr></thead><tbody>{rows.map(row => <tr key={row._key} className="border-b border-slate-200/20 align-top"><td className="whitespace-nowrap p-3 text-xs">{row.timestamp ? new Date(row.timestamp).toLocaleString('vi-VN') : '—'}</td><td className="p-3"><span className="font-mono font-semibold">{row.assetCode}</span><span className="block">{row.assetName}</span><span className="block text-xs text-slate-500">SKU: {row.sku || '—'} {row.serialNumber ? `· Serial: ${row.serialNumber}` : ''}</span></td><td className="p-3">{row.jobCode || '—'}</td><td className="p-3">{row.returnedBy || '—'}</td><td className="p-3">{row.receivedBy || '—'}</td><td className="p-3"><span className={`rounded-full px-2 py-1 text-xs font-semibold ${row.condition === 'Tốt' ? 'bg-emerald-500/10 text-emerald-600' : row.condition === 'Hư hỏng' ? 'bg-rose-500/10 text-rose-600' : 'bg-amber-500/10 text-amber-600'}`}>{row.condition || '—'}</span></td><td className="max-w-xs whitespace-pre-wrap p-3 text-xs">{row.note || 'Không có ghi chú'}</td><td className="p-3 text-xs">{row.executorName}</td></tr>)}</tbody></table></div> : <div className="rounded-xl border border-dashed p-8 text-center"><History className="mx-auto mb-2 h-8 w-8 text-slate-400" /><p className="font-semibold">Chưa có lịch sử hoàn kho phù hợp</p><p className="mt-1 text-xs text-slate-500">Sau khi hoàn kho thiết bị, thông tin sẽ xuất hiện tại đây. Kiểm tra bộ lọc nếu đã có dữ liệu.</p></div>; })()}
+            </section>
           </div>
         )}
 
@@ -1861,6 +1932,39 @@ const handleCreateStocktake = async (e) => {
               <X className="h-4 w-4" />
             </button>
           </div>
+        </div>
+      )}
+
+      {/* --- RETURN ASSET FORM MODAL --- */}
+      {returnAssetModal && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-sm sm:p-6" onMouseDown={(e) => { if (e.target === e.currentTarget && !returnAssetLoading) setReturnAssetModal(null); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="return-asset-title" className={`w-full max-w-xl overflow-hidden rounded-3xl border shadow-2xl ${darkMode ? 'border-slate-700 bg-slate-900 text-slate-100' : 'border-slate-200 bg-white text-slate-900'}`}>
+            <div className="flex items-start gap-4 border-b border-slate-200/70 bg-gradient-to-r from-emerald-500/10 to-teal-500/5 px-5 py-5 sm:px-6">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-600"><RotateCcw className="h-6 w-6" /></div>
+              <div className="min-w-0 flex-1">
+                <h2 id="return-asset-title" className="text-lg font-bold sm:text-xl">Xác nhận hoàn kho thiết bị</h2>
+                <p className={`mt-1 text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Kiểm tra thiết bị và ghi nhận thông tin bàn giao trước khi xác nhận.</p>
+              </div>
+              <button type="button" disabled={returnAssetLoading} onClick={() => setReturnAssetModal(null)} className={`rounded-xl p-2 transition ${darkMode ? 'text-slate-400 hover:bg-slate-800' : 'text-slate-400 hover:bg-slate-100'}`} aria-label="Đóng biểu mẫu"><X className="h-5 w-5" /></button>
+            </div>
+            <form onSubmit={handleSubmitAssetReturn} className="space-y-5 p-5 sm:p-6">
+              <div className={`rounded-2xl border p-4 ${darkMode ? 'border-slate-700 bg-slate-800/70' : 'border-slate-200 bg-slate-50'}`}>
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500"><PackageCheck className="h-4 w-4" /> Thiết bị hoàn kho</div>
+                <div className="mt-2 flex flex-wrap items-start justify-between gap-3">
+                  <div><p className="font-bold">{returnAssetModal.name}</p><p className="mt-1 text-sm text-slate-500">Mã tài sản: <span className="font-mono font-semibold">{returnAssetModal.assetCode}</span></p></div>
+                  <span className="rounded-full bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-600">Đang ở Job</span>
+                </div>
+                <div className="mt-3 grid grid-cols-1 gap-2 text-sm sm:grid-cols-2"><div><span className="text-slate-500">Job/Event: </span><span className="font-medium">{returnAssetModal.currentJob?.jobCode || 'Chưa có mã Job'}</span></div><div><span className="text-slate-500">SKU: </span><span className="font-medium">{returnAssetModal.sku || '—'}</span></div></div>
+              </div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div><label htmlFor="return-returned-by" className="mb-1.5 block text-sm font-semibold">Người bàn giao về kho <span className="text-rose-500">*</span></label><input id="return-returned-by" required minLength={2} maxLength={120} autoFocus value={returnAssetForm.returnedBy} onChange={e => setReturnAssetForm(prev => ({ ...prev, returnedBy: e.target.value }))} placeholder="Tên người mang thiết bị về" className={`w-full rounded-xl border px-3.5 py-3 text-sm outline-none transition focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10 ${darkMode ? 'border-slate-700 bg-slate-800' : 'border-slate-300 bg-white'}`} /></div>
+                <div><label htmlFor="return-received-by" className="mb-1.5 block text-sm font-semibold">Nhân sự kho nhận lại <span className="text-rose-500">*</span></label><input id="return-received-by" required minLength={2} maxLength={120} value={returnAssetForm.receivedBy} onChange={e => setReturnAssetForm(prev => ({ ...prev, receivedBy: e.target.value }))} placeholder="Tên nhân sự kho xác nhận" className={`w-full rounded-xl border px-3.5 py-3 text-sm outline-none transition focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10 ${darkMode ? 'border-slate-700 bg-slate-800' : 'border-slate-300 bg-white'}`} /></div>
+              </div>
+              <div><label htmlFor="return-condition" className="mb-1.5 block text-sm font-semibold">Tình trạng thiết bị khi nhận <span className="text-rose-500">*</span></label><select id="return-condition" value={returnAssetForm.condition} onChange={e => setReturnAssetForm(prev => ({ ...prev, condition: e.target.value }))} className={`w-full rounded-xl border px-3.5 py-3 text-sm outline-none transition focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10 ${darkMode ? 'border-slate-700 bg-slate-800' : 'border-slate-300 bg-white'}`}><option value="Tốt">Tốt — có thể sử dụng tiếp</option><option value="Cần kiểm tra">Cần kiểm tra — chưa cấp phát lại</option><option value="Hư hỏng">Hư hỏng — chuyển bảo trì</option></select><p className="mt-1.5 text-xs text-slate-500">Nếu chọn “Hư hỏng”, thiết bị sẽ được đánh dấu bảo trì.</p></div>
+              <div><label htmlFor="return-note" className="mb-1.5 block text-sm font-semibold">Ghi chú / phụ kiện thiếu <span className="font-normal text-slate-500">(không bắt buộc)</span></label><textarea id="return-note" rows={3} maxLength={1000} value={returnAssetForm.note} onChange={e => setReturnAssetForm(prev => ({ ...prev, note: e.target.value }))} placeholder="Ví dụ: thiếu dây nguồn, trầy vỏ, đủ phụ kiện..." className={`w-full resize-y rounded-xl border px-3.5 py-3 text-sm outline-none transition focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10 ${darkMode ? 'border-slate-700 bg-slate-800' : 'border-slate-300 bg-white'}`} /></div>
+              <div className={`flex flex-col-reverse gap-3 border-t pt-4 sm:flex-row sm:justify-end ${darkMode ? 'border-slate-700' : 'border-slate-200'}`}><button type="button" disabled={returnAssetLoading} onClick={() => setReturnAssetModal(null)} className={`rounded-xl border px-5 py-3 text-sm font-semibold transition disabled:opacity-50 ${darkMode ? 'border-slate-700 hover:bg-slate-800' : 'border-slate-300 hover:bg-slate-50'}`}>Hủy</button><button type="submit" disabled={returnAssetLoading} className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-emerald-600/20 transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60">{returnAssetLoading ? <><RefreshCw className="h-4 w-4 animate-spin" /> Đang lưu...</> : <><CheckCircle2 className="h-4 w-4" /> Xác nhận hoàn kho</>}</button></div>
+            </form>
+          </section>
         </div>
       )}
 

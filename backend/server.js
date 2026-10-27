@@ -293,7 +293,7 @@ app.patch('/api/jobs/:id', authenticate, authorize('admin', 'manager'), async (r
 
 // Thiết bị tái sử dụng được theo dõi từng mã tài sản/serial.
 app.get('/api/assets', authenticate, async (req, res) => {
-  try { const assets = await Asset.find({}).populate('currentJob', 'jobCode name status').sort({ createdAt: -1 }).lean(); res.json(assets); }
+  try { const assets = await Asset.find({}).populate('currentJob', 'jobCode name status').populate('returnLogs.executorId', 'fullName email').sort({ createdAt: -1 }).lean(); res.json(assets); }
   catch (err) { res.status(500).json({ error: 'Không thể tải danh sách thiết bị.' }); }
 });
 app.post('/api/assets', authenticate, authorize('admin', 'manager', 'warehouse'), async (req, res) => {
@@ -328,7 +328,12 @@ app.post('/api/assets/:id/return', authenticate, authorize('admin', 'manager', '
       if (ticket) { ticket.totalExportedQuantity = Math.max(0, Number(ticket.totalExportedQuantity || 0) - 1); ticket.status = ticket.totalExportedQuantity <= 0 ? 'Đang lưu kho' : (ticket.totalExportedQuantity >= ticket.inbound.quantity ? 'Đã xuất hết' : 'Đã xuất kho một phần'); await ticket.save(); }
       asset.sourceTicket = null; await asset.save();
     }
-    await writeAudit(req, 'asset.returned', 'asset', asset._id, { condition }); res.json(asset);
+    await writeAudit(req, 'asset.returned', 'asset', asset._id, { condition });
+    const responseAsset = await Asset.findById(asset._id)
+      .populate('currentJob', 'jobCode name status')
+      .populate('returnLogs.executorId', 'fullName email')
+      .lean();
+    res.json(responseAsset);
   } catch (err) { res.status(400).json({ error: 'Không thể hoàn kho thiết bị.' }); }
 });
 
