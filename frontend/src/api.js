@@ -56,3 +56,9 @@ export const createInboundTicket = async (data) => (await api.post('/tickets/inb
 export const submitOutboundTicket = async (id, data) => (await api.post(`/tickets/${id}/outbound`, data)).data;
 export const updateTicket = async (id, data) => (await api.put(`/tickets/${id}`, data)).data;
 export const deleteTicket = async (id) => (await api.delete(`/tickets/${id}`)).data;
+export const fetchJobs = async () => (await api.get('/jobs')).data;
+export const createJob = async (data) => (await api.post('/jobs', data)).data;
+export const updateJob = async (id, data) => (await api.patch(`/jobs/${id}`, data)).data;
+export const fetchAssets = async () => (await api.get('/assets')).data;
+export const createAsset = async (data) => (await api.post('/assets', data)).data;
+export const returnAsset = async (id, data) => (await api.post(`/assets/${id}/return`, data)).data;

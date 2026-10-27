@@ -4,6 +4,8 @@ const cors = require('cors');
 require('dotenv').config();
 
 const Ticket = require('./models/Ticket');
+const Job = require('./models/Job');
+const Asset = require('./models/Asset');
 const AuditLog = require('./models/AuditLog');
 const authRoutes = require('./routes/auth.routes');
 const { authenticate, authorize } = require('./middleware/auth');
@@ -131,6 +133,21 @@ app.post('/api/tickets/:id/outbound', authorize('admin', 'manager', 'warehouse')
     const exportQty = Number(req.body.quantity);
     if (!Number.isFinite(exportQty) || exportQty <= 0) return res.status(400).json({ error: 'Số lượng xuất phải lớn hơn 0.' });
 
+    const jobId = req.body.jobId || null;
+    let job = null;
+    if (jobId) {
+      if (!mongoose.isValidObjectId(jobId)) return res.status(400).json({ error: 'Job/Event không hợp lệ.' });
+      job = await Job.findById(jobId);
+      if (!job || ['completed', 'cancelled'].includes(job.status)) return res.status(400).json({ error: 'Job/Event không tồn tại hoặc đã đóng.' });
+    }
+    const assetIds = Array.isArray(req.body.assetIds) ? [...new Set(req.body.assetIds.map(String))] : [];
+    if (assetIds.length) {
+      if (assetIds.some(id => !mongoose.isValidObjectId(id))) return res.status(400).json({ error: 'Có mã thiết bị không hợp lệ.' });
+      const assets = await Asset.find({ _id: { $in: assetIds }, sku: String(req.body.sku || '').trim().toUpperCase(), status: 'available' });
+      if (assets.length !== assetIds.length) return res.status(409).json({ error: 'Một hoặc nhiều thiết bị không còn khả dụng hoặc không khớp SKU. Tải lại dữ liệu.' });
+      if (Number(req.body.quantity) !== assetIds.length) return res.status(400).json({ error: 'Với thiết bị quản lý theo mã riêng, số lượng xuất phải bằng số thiết bị chọn.' });
+    }
+
     // Atomic conditional update prevents concurrent requests from exporting more than the remaining quantity.
     const ticket = await Ticket.findOneAndUpdate(
       {
@@ -152,7 +169,9 @@ app.post('/api/tickets/:id/outbound', authorize('admin', 'manager', 'warehouse')
           executor: req.user.fullName,
           transportUnit: String(req.body.transportUnit || '').slice(0, 120),
           note: String(req.body.note || '').slice(0, 2000),
-          photoUrl: typeof req.body.photoUrl === 'string' ? req.body.photoUrl : undefined
+          photoUrl: typeof req.body.photoUrl === 'string' ? req.body.photoUrl : undefined,
+          jobId: job?._id || null, jobCode: job?.jobCode || String(req.body.jobCode || '').slice(0, 80),
+          jobName: job?.name || String(req.body.jobName || '').slice(0, 200), assetIds
         } }
       },
       { new: true, runValidators: true }
@@ -166,6 +185,11 @@ app.post('/api/tickets/:id/outbound', authorize('admin', 'manager', 'warehouse')
       return res.status(409).json({ error: `Số lượng xuất vượt tồn khả dụng (${remaining}). Tải lại dữ liệu và thử lại.` });
     }
 
+    if (assetIds.length) {
+      const assigned = await Asset.updateMany({ _id: { $in: assetIds }, status: 'available' }, { $set: { status: 'assigned', currentJob: job?._id || null, sourceTicket: ticket._id } });
+      if (assigned.modifiedCount !== assetIds.length) return res.status(409).json({ error: 'Không thể gán một số thiết bị do trạng thái vừa thay đổi. Kiểm tra lại tồn kho.' });
+    }
+    if (job && job.status === 'planning') { job.status = 'active'; await job.save(); }
     ticket.status = Number(ticket.totalExportedQuantity || 0) >= Number(ticket.inbound?.quantity || 0)
       ? 'Đã xuất hết'
       : 'Đã xuất kho một phần';
@@ -231,6 +255,64 @@ app.delete('/api/tickets/:id', authorize('admin'), async (req, res) => {
     console.error('Xóa phiếu kho:', err.message);
     res.status(500).json({ error: 'Không thể xóa phiếu kho.' });
   }
+});
+
+// Job/Event: mọi tài khoản đăng nhập xem được; tạo/sửa chỉ Admin, Quản lý, Production.
+app.get('/api/jobs', authenticate, async (req, res) => {
+  try { const jobs = await Job.find({}).sort({ startDate: -1, createdAt: -1 }).lean(); res.json(jobs); }
+  catch (err) { res.status(500).json({ error: 'Không thể tải danh sách Job/Event.' }); }
+});
+app.post('/api/jobs', authenticate, authorize('admin', 'manager', 'production'), async (req, res) => {
+  try {
+    const jobCode = String(req.body.jobCode || '').trim().toUpperCase();
+    const name = String(req.body.name || '').trim();
+    if (!/^[A-Z0-9][A-Z0-9_-]{2,39}$/.test(jobCode)) return res.status(400).json({ error: 'Mã Job phải 3-40 ký tự, gồm chữ, số, gạch ngang hoặc gạch dưới.' });
+    if (name.length < 2 || name.length > 200) return res.status(400).json({ error: 'Tên Job phải từ 2-200 ký tự.' });
+    const job = await Job.create({ jobCode, name, client: String(req.body.client || '').slice(0,160), eventLocation: String(req.body.eventLocation || '').slice(0,250), startDate: req.body.startDate || undefined, endDate: req.body.endDate || undefined, owner: String(req.body.owner || req.user.fullName).slice(0,120), notes: String(req.body.notes || '').slice(0,2000), status: 'planning', createdBy: req.user._id });
+    await writeAudit(req, 'job.created', 'job', job._id, { jobCode, name }); res.status(201).json(job);
+  } catch (err) { res.status(err.code === 11000 ? 409 : 400).json({ error: err.code === 11000 ? 'Mã Job đã tồn tại.' : 'Không thể tạo Job/Event.' }); }
+});
+app.patch('/api/jobs/:id', authenticate, authorize('admin', 'manager'), async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: 'ID Job không hợp lệ.' });
+    const job = await Job.findById(req.params.id); if (!job) return res.status(404).json({ error: 'Không tìm thấy Job.' });
+    if (['planning','active','completed','cancelled'].includes(req.body.status)) job.status = req.body.status;
+    for (const key of ['client','eventLocation','owner','notes']) if (typeof req.body[key] === 'string') job[key] = req.body[key].slice(0, key === 'notes' ? 2000 : 250);
+    if (typeof req.body.name === 'string' && req.body.name.trim()) job.name = req.body.name.trim().slice(0,200);
+    if (req.body.startDate !== undefined) job.startDate = req.body.startDate || null;
+    if (req.body.endDate !== undefined) job.endDate = req.body.endDate || null;
+    await job.save(); await writeAudit(req, 'job.updated', 'job', job._id, { status: job.status }); res.json(job);
+  } catch (err) { res.status(400).json({ error: 'Không thể cập nhật Job/Event.' }); }
+});
+
+// Thiết bị tái sử dụng được theo dõi từng mã tài sản/serial.
+app.get('/api/assets', authenticate, async (req, res) => {
+  try { const assets = await Asset.find({}).populate('currentJob', 'jobCode name status').sort({ createdAt: -1 }).lean(); res.json(assets); }
+  catch (err) { res.status(500).json({ error: 'Không thể tải danh sách thiết bị.' }); }
+});
+app.post('/api/assets', authenticate, authorize('admin', 'manager', 'warehouse'), async (req, res) => {
+  try {
+    const assetCode = String(req.body.assetCode || '').trim().toUpperCase();
+    const name = String(req.body.name || '').trim(); const sku = String(req.body.sku || '').trim().toUpperCase();
+    if (!/^[A-Z0-9][A-Z0-9_-]{2,59}$/.test(assetCode)) return res.status(400).json({ error: 'Mã tài sản phải 3-60 ký tự.' });
+    if (name.length < 2 || !sku) return res.status(400).json({ error: 'Tên thiết bị và SKU là bắt buộc.' });
+    const asset = await Asset.create({ assetCode, name, sku, serialNumber: String(req.body.serialNumber || '').slice(0,160), category: String(req.body.category || 'Thiết bị').slice(0,100), location: String(req.body.location || 'Kho P2P').slice(0,160), condition: ['Tốt','Cần kiểm tra','Hư hỏng'].includes(req.body.condition) ? req.body.condition : 'Tốt', notes: String(req.body.notes || '').slice(0,2000), createdBy: req.user._id });
+    await writeAudit(req, 'asset.created', 'asset', asset._id, { assetCode, sku }); res.status(201).json(asset);
+  } catch (err) { res.status(err.code === 11000 ? 409 : 400).json({ error: err.code === 11000 ? 'Mã tài sản đã tồn tại.' : 'Không thể tạo thiết bị.' }); }
+});
+app.post('/api/assets/:id/return', authenticate, authorize('admin', 'manager', 'warehouse'), async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: 'ID thiết bị không hợp lệ.' });
+    const condition = ['Tốt','Cần kiểm tra','Hư hỏng'].includes(req.body.condition) ? req.body.condition : 'Tốt';
+    const asset = await Asset.findOneAndUpdate({ _id: req.params.id, status: 'assigned' }, { $set: { status: condition === 'Hư hỏng' ? 'maintenance' : 'available', condition, currentJob: null, location: String(req.body.location || 'Kho P2P').slice(0,160) } }, { new: true });
+    if (!asset) return res.status(409).json({ error: 'Thiết bị không ở trạng thái đang xuất/đang gán Job.' });
+    if (asset.sourceTicket) {
+      const ticket = await Ticket.findById(asset.sourceTicket);
+      if (ticket) { ticket.totalExportedQuantity = Math.max(0, Number(ticket.totalExportedQuantity || 0) - 1); ticket.status = ticket.totalExportedQuantity <= 0 ? 'Đang lưu kho' : (ticket.totalExportedQuantity >= ticket.inbound.quantity ? 'Đã xuất hết' : 'Đã xuất kho một phần'); await ticket.save(); }
+      asset.sourceTicket = null; await asset.save();
+    }
+    await writeAudit(req, 'asset.returned', 'asset', asset._id, { condition }); res.json(asset);
+  } catch (err) { res.status(400).json({ error: 'Không thể hoàn kho thiết bị.' }); }
 });
 
 // Chỉ Admin/Quản lý xem audit log toàn hệ thống.

@@ -11,7 +11,7 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   BarChart, Bar, Legend, PieChart, Pie, Cell
 } from 'recharts';
-import { fetchTickets, createInboundTicket, submitOutboundTicket, updateTicket, deleteTicket, login, getCurrentUser, logout, getAccessToken, setAccessToken, fetchUsers, createUser, updateUser } from './api';
+import { fetchTickets, createInboundTicket, submitOutboundTicket, updateTicket, deleteTicket, login, getCurrentUser, logout, getAccessToken, setAccessToken, fetchUsers, createUser, updateUser, fetchJobs, createJob, fetchAssets, createAsset, returnAsset } from './api';
 
 const COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4'];
 
@@ -32,6 +32,11 @@ export default function App() {
 
   const [inventory, setInventory] = useState([]);
   const [logs, setLogs] = useState([]);
+  const [jobs, setJobs] = useState([]);
+  const [assets, setAssets] = useState([]);
+  const [jobForm, setJobForm] = useState({ jobCode: '', name: '', client: '', eventLocation: '', startDate: '', endDate: '', owner: '' });
+  const [assetForm, setAssetForm] = useState({ assetCode: '', name: '', sku: '', serialNumber: '', category: 'Thiết bị', location: 'Kho P2P' });
+  const [selectedAssetIds, setSelectedAssetIds] = useState([]);
 
   // Hàm load dữ liệu thật từ MongoDB Atlas qua Backend Cổng 5000
   const loadData = async () => {
@@ -156,6 +161,28 @@ export default function App() {
     }
   }, [currentUser, activeTab]);
 
+  useEffect(() => {
+    if (!currentUser || !['jobs', 'outbound'].includes(activeTab)) return;
+    Promise.all([fetchJobs(), fetchAssets()]).then(([jobData, assetData]) => { setJobs(jobData); setAssets(assetData); }).catch(err => showNotification(err.response?.data?.error || 'Không tải được Job/thiết bị.', 'error'));
+  }, [currentUser, activeTab]);
+
+  const handleCreateJob = async (e) => {
+    e.preventDefault();
+    try { const created = await createJob(jobForm); setJobs(prev => [created, ...prev]); setJobForm({ jobCode: '', name: '', client: '', eventLocation: '', startDate: '', endDate: '', owner: '' }); showNotification('Đã tạo Job/Event.'); }
+    catch (err) { showNotification(err.response?.data?.error || 'Không tạo được Job.', 'error'); }
+  };
+  const handleCreateAsset = async (e) => {
+    e.preventDefault();
+    try { const created = await createAsset(assetForm); setAssets(prev => [created, ...prev]); setAssetForm({ assetCode: '', name: '', sku: '', serialNumber: '', category: 'Thiết bị', location: 'Kho P2P' }); showNotification('Đã đăng ký thiết bị.'); }
+    catch (err) { showNotification(err.response?.data?.error || 'Không đăng ký được thiết bị.', 'error'); }
+  };
+  const handleAssetReturn = async (asset) => {
+    const condition = window.prompt('Tình trạng khi hoàn kho: Tốt, Cần kiểm tra, hoặc Hư hỏng', 'Tốt');
+    if (!condition) return;
+    try { await returnAsset(asset._id, { condition }); setAssets(prev => prev.map(a => a._id === asset._id ? { ...a, status: condition === 'Hư hỏng' ? 'maintenance' : 'available', currentJob: null, condition } : a)); showNotification('Đã cập nhật hoàn kho thiết bị.'); }
+    catch (err) { showNotification(err.response?.data?.error || 'Không hoàn kho được.', 'error'); }
+  };
+
   const [activePhotoModal, setActivePhotoModal] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterDepartment, setFilterDepartment] = useState('ALL');
@@ -172,6 +199,7 @@ export default function App() {
     condition: 'Mới 100%',
     supplier: '',
     project: 'Sự kiện Ra mắt Sản phẩm Mới',
+    jobId: '',
     department: 'Marketing',
     keeper: 'Kiên Đặng',
     zone: 'Khu A - Kệ A1',
@@ -187,6 +215,7 @@ export default function App() {
     condition: 'Tốt / Đã đóng gói',
     receiver: '',
     project: 'Sự kiện Ra mắt Sản phẩm Mới',
+    jobId: '',
     department: 'Marketing',
     approver: 'Trần Văn Quản Lý',
     executor: 'Kiên Đặng',
@@ -380,6 +409,9 @@ const getCurrentFormattedDate = () => {
 
       const payload = {
         quantity: Number(outboundForm.quantity),
+        sku: targetTicket.sku,
+        jobId: outboundForm.jobId || undefined,
+        assetIds: selectedAssetIds,
         condition: outboundForm.condition,
         receiverDepartment: outboundForm.department,
         receiverName: outboundForm.receiver,
@@ -389,7 +421,8 @@ const getCurrentFormattedDate = () => {
       };
 
       await submitOutboundTicket(targetTicket._id, payload);
-      showNotification('Xuất kho thành công. Tồn kho đã được cập nhật.', 'success');
+      setSelectedAssetIds([]);
+      showNotification('Xuất kho thành công. Tồn kho và Job/Event đã được cập nhật.', 'success');
       loadData();
       setActiveTab('overview');
     } catch (err) {
@@ -677,6 +710,10 @@ const handleExportCSV = () => {
               )}
             </button>
 
+            <button onClick={() => { setActiveTab('jobs'); setMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all ${activeTab === 'jobs' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}>
+              <Briefcase className="w-4 h-4" /><span>Job/Event & Thiết bị</span>
+            </button>
+
             <button
               onClick={() => { setActiveTab('logs'); setMobileMenuOpen(false); }}
               className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all ${
@@ -724,6 +761,7 @@ const handleExportCSV = () => {
               {activeTab === 'outbound' && '📤 Quy Trình Xuất Kho Hàng Hóa P2P'}
               {activeTab === 'inventory' && '📦 Danh Mục Quản Lý Tồn Kho P2P'}
               {activeTab === 'logs' && '📋 Nhật Ký Giao Nhận P2P & Audit Trail'}
+              {activeTab === 'jobs' && '🗓️ Quản Lý Job/Event & Thiết Bị Theo Mã Riêng'}
               {activeTab === 'users' && '🛡️ Quản Lý Tài Khoản & Phân Quyền'}
             </h2>
             <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
@@ -1260,7 +1298,7 @@ const handleExportCSV = () => {
                   <select
                     required
                     value={outboundForm.selectedSku}
-                    onChange={e => setOutboundForm({ ...outboundForm, selectedSku: e.target.value })}
+                    onChange={e => { setOutboundForm({ ...outboundForm, selectedSku: e.target.value }); setSelectedAssetIds([]); }}
                     className={`w-full px-3.5 py-2.5 rounded-xl border focus:ring-2 focus:ring-amber-500 outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
                   >
                     <option value="">-- Chọn mặt hàng trong kho P2P --</option>
@@ -1270,6 +1308,15 @@ const handleExportCSV = () => {
                       </option>
                     ))}
                   </select>
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className={`block font-bold uppercase mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>Gắn với Job/Event (khuyến nghị)</label>
+                  <select value={outboundForm.jobId} onChange={e => setOutboundForm({ ...outboundForm, jobId: e.target.value })} className={`w-full px-3.5 py-2.5 rounded-xl border outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}>
+                    <option value="">-- Chọn Job/Event --</option>
+                    {jobs.filter(j => !['completed','cancelled'].includes(j.status)).map(j => <option key={j._id} value={j._id}>{j.jobCode} — {j.name} {j.client ? `(${j.client})` : ''}</option>)}
+                  </select>
+                  <p className="mt-1 text-[11px] text-slate-500">Tạo Job/Event tại mục “Job/Event & Thiết bị”. Danh sách được tải khi mở mục đó.</p>
                 </div>
 
                 <div>
@@ -1283,6 +1330,17 @@ const handleExportCSV = () => {
                     className={`w-full px-3.5 py-2.5 rounded-xl border focus:ring-2 focus:ring-amber-500 outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
                   />
                 </div>
+
+                {outboundForm.selectedSku && assets.some(a => a.sku === outboundForm.selectedSku && a.status === 'available') && (
+                  <div className="md:col-span-2 rounded-xl border border-indigo-300/50 p-3">
+                    <label className={`block font-bold mb-2 ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>Thiết bị quản lý theo mã riêng (không bắt buộc)</label>
+                    <p className="text-[11px] text-slate-500 mb-2">Chọn từng thiết bị nếu đang xuất TV, màn hình, router, PC... Khi chọn thiết bị, số lượng xuất phải bằng số thiết bị đã chọn.</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-40 overflow-auto">
+                      {assets.filter(a => a.sku === outboundForm.selectedSku && a.status === 'available').map(a => <label key={a._id} className="flex items-center gap-2 text-xs p-2 rounded-lg bg-slate-500/5"><input type="checkbox" checked={selectedAssetIds.includes(a._id)} onChange={e => { const next = e.target.checked ? [...selectedAssetIds, a._id] : selectedAssetIds.filter(id => id !== a._id); setSelectedAssetIds(next); if (next.length) setOutboundForm(prev => ({...prev, quantity: next.length})); }} /> <span className="font-mono">{a.assetCode}</span> — {a.name} {a.serialNumber ? `(${a.serialNumber})` : ''}</label>)}
+                    </div>
+                    {selectedAssetIds.length > 0 && <button type="button" onClick={() => { setSelectedAssetIds([]); }} className="mt-2 text-xs text-indigo-500">Bỏ chọn thiết bị ({selectedAssetIds.length})</button>}
+                  </div>
+                )}
 
                 <div>
                   <label className={`block font-bold uppercase mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>Tình Trạng Hàng Khi Bàn Giao</label>
@@ -1609,6 +1667,45 @@ const handleExportCSV = () => {
                   </div>
                 ))}
               </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'jobs' && (
+          <div className="space-y-6">
+            <div className={`p-5 rounded-2xl border ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'}`}>
+              <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Briefcase className="w-5 h-5 text-indigo-500"/>Tạo Job / Event</h3>
+              <form onSubmit={handleCreateJob} className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                <input required minLength="3" placeholder="Mã Job (VD: MRD-2026-01)" value={jobForm.jobCode} onChange={e=>setJobForm({...jobForm,jobCode:e.target.value.toUpperCase()})} className="rounded-xl border p-3 bg-transparent"/>
+                <input required placeholder="Tên Job/Event" value={jobForm.name} onChange={e=>setJobForm({...jobForm,name:e.target.value})} className="rounded-xl border p-3 bg-transparent"/>
+                <input placeholder="Nhãn hàng / Khách hàng" value={jobForm.client} onChange={e=>setJobForm({...jobForm,client:e.target.value})} className="rounded-xl border p-3 bg-transparent"/>
+                <input placeholder="Địa điểm tổ chức" value={jobForm.eventLocation} onChange={e=>setJobForm({...jobForm,eventLocation:e.target.value})} className="rounded-xl border p-3 bg-transparent"/>
+                <input type="date" aria-label="Ngày bắt đầu" value={jobForm.startDate} onChange={e=>setJobForm({...jobForm,startDate:e.target.value})} className="rounded-xl border p-3 bg-transparent"/>
+                <input type="date" aria-label="Ngày kết thúc" value={jobForm.endDate} onChange={e=>setJobForm({...jobForm,endDate:e.target.value})} className="rounded-xl border p-3 bg-transparent"/>
+                <input placeholder="Production phụ trách" value={jobForm.owner} onChange={e=>setJobForm({...jobForm,owner:e.target.value})} className="rounded-xl border p-3 bg-transparent"/>
+                <button className="rounded-xl bg-indigo-600 text-white font-bold p-3 md:col-span-2">+ Tạo Job/Event</button>
+              </form>
+            </div>
+            <div className={`p-5 rounded-2xl border ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'}`}>
+              <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><PackageCheck className="w-5 h-5 text-emerald-500"/>Đăng ký thiết bị quản lý theo mã riêng</h3>
+              <p className="text-xs text-slate-500 mb-4">Dành cho thiết bị tái sử dụng như TV, LED, PC, máy in photobooth, router. SKU phải khớp SKU mặt hàng đang có trong kho.</p>
+              <form onSubmit={handleCreateAsset} className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                <input required placeholder="Mã tài sản (VD: TV-001)" value={assetForm.assetCode} onChange={e=>setAssetForm({...assetForm,assetCode:e.target.value.toUpperCase()})} className="rounded-xl border p-3 bg-transparent"/>
+                <input required placeholder="Tên thiết bị" value={assetForm.name} onChange={e=>setAssetForm({...assetForm,name:e.target.value})} className="rounded-xl border p-3 bg-transparent"/>
+                <input required placeholder="SKU phải khớp mặt hàng kho" value={assetForm.sku} onChange={e=>setAssetForm({...assetForm,sku:e.target.value.toUpperCase()})} className="rounded-xl border p-3 bg-transparent"/>
+                <input placeholder="Serial number (nếu có)" value={assetForm.serialNumber} onChange={e=>setAssetForm({...assetForm,serialNumber:e.target.value})} className="rounded-xl border p-3 bg-transparent"/>
+                <input placeholder="Nhóm thiết bị" value={assetForm.category} onChange={e=>setAssetForm({...assetForm,category:e.target.value})} className="rounded-xl border p-3 bg-transparent"/>
+                <input placeholder="Vị trí kho" value={assetForm.location} onChange={e=>setAssetForm({...assetForm,location:e.target.value})} className="rounded-xl border p-3 bg-transparent"/>
+                <button className="rounded-xl bg-emerald-600 text-white font-bold p-3 md:col-span-3">+ Đăng ký thiết bị</button>
+              </form>
+            </div>
+            <div className={`p-5 rounded-2xl border overflow-x-auto ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'}`}>
+              <h3 className="font-bold text-lg mb-4">Danh sách Job/Event ({jobs.length})</h3>
+              <table className="w-full text-sm text-left"><thead><tr className="border-b"><th className="p-3">Mã Job</th><th className="p-3">Tên Job</th><th className="p-3">Khách hàng</th><th className="p-3">Địa điểm</th><th className="p-3">Trạng thái</th></tr></thead><tbody>{jobs.map(j=><tr key={j._id} className="border-b border-slate-200/30"><td className="p-3 font-mono">{j.jobCode}</td><td className="p-3">{j.name}</td><td className="p-3">{j.client || '—'}</td><td className="p-3">{j.eventLocation || '—'}</td><td className="p-3"><span className="rounded-full bg-indigo-500/10 px-2 py-1">{{planning:'Chuẩn bị',active:'Đang chạy',completed:'Hoàn tất',cancelled:'Đã hủy'}[j.status] || j.status}</span></td></tr>)}</tbody></table>
+            </div>
+            <div className={`p-5 rounded-2xl border overflow-x-auto ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'}`}>
+              <h3 className="font-bold text-lg mb-4">Thiết bị tái sử dụng ({assets.length})</h3>
+              <table className="w-full text-sm text-left"><thead><tr className="border-b"><th className="p-3">Mã tài sản</th><th className="p-3">Thiết bị</th><th className="p-3">SKU</th><th className="p-3">Serial</th><th className="p-3">Job hiện tại</th><th className="p-3">Trạng thái</th><th className="p-3">Thao tác</th></tr></thead><tbody>{assets.map(a=><tr key={a._id} className="border-b border-slate-200/30"><td className="p-3 font-mono">{a.assetCode}</td><td className="p-3">{a.name}</td><td className="p-3">{a.sku}</td><td className="p-3">{a.serialNumber || '—'}</td><td className="p-3">{a.currentJob?.jobCode || '—'}</td><td className="p-3">{{available:'Trong kho',assigned:'Đang ở Job',maintenance:'Bảo trì',retired:'Ngừng sử dụng'}[a.status] || a.status}</td><td className="p-3">{a.status === 'assigned' && <button onClick={()=>handleAssetReturn(a)} className="rounded-lg bg-emerald-600 text-white px-3 py-1">Hoàn kho</button>}</td></tr>)}</tbody></table>
             </div>
           </div>
         )}
