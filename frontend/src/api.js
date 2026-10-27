@@ -62,3 +62,6 @@ export const updateJob = async (id, data) => (await api.patch(`/jobs/${id}`, dat
 export const fetchAssets = async () => (await api.get('/assets')).data;
 export const createAsset = async (data) => (await api.post('/assets', data)).data;
 export const returnAsset = async (id, data) => (await api.post(`/assets/${id}/return`, data)).data;
+
+export const fetchStocktakes = async () => (await api.get('/stocktakes')).data;
+export const createStocktake = async (data) => (await api.post('/stocktakes', data)).data;

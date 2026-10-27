@@ -11,7 +11,7 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   BarChart, Bar, Legend, PieChart, Pie, Cell
 } from 'recharts';
-import { fetchTickets, createInboundTicket, submitOutboundTicket, updateTicket, deleteTicket, login, getCurrentUser, logout, getAccessToken, setAccessToken, fetchUsers, createUser, updateUser, fetchJobs, createJob, fetchAssets, createAsset, returnAsset } from './api';
+import { fetchTickets, createInboundTicket, submitOutboundTicket, updateTicket, deleteTicket, login, getCurrentUser, logout, getAccessToken, setAccessToken, fetchUsers, createUser, updateUser, fetchJobs, createJob, fetchAssets, createAsset, returnAsset, fetchStocktakes, createStocktake } from './api';
 
 const COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4'];
 
@@ -34,6 +34,10 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [jobs, setJobs] = useState([]);
   const [assets, setAssets] = useState([]);
+  const [stocktakes, setStocktakes] = useState([]);
+  const [stocktakeForm, setStocktakeForm] = useState({ location: 'Toàn kho', note: '' });
+  const [stocktakeCounts, setStocktakeCounts] = useState({});
+  const [receiverConfirmed, setReceiverConfirmed] = useState(false);
   const [jobForm, setJobForm] = useState({ jobCode: '', name: '', client: '', eventLocation: '', startDate: '', endDate: '', owner: '' });
   const [assetForm, setAssetForm] = useState({ assetCode: '', name: '', sku: '', serialNumber: '', category: 'Thiết bị', location: 'Kho P2P' });
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
@@ -162,8 +166,9 @@ export default function App() {
   }, [currentUser, activeTab]);
 
   useEffect(() => {
-    if (!currentUser || !['jobs', 'outbound'].includes(activeTab)) return;
+    if (!currentUser || !['jobs', 'outbound', 'overview', 'stocktake'].includes(activeTab)) return;
     Promise.all([fetchJobs(), fetchAssets()]).then(([jobData, assetData]) => { setJobs(jobData); setAssets(assetData); }).catch(err => showNotification(err.response?.data?.error || 'Không tải được Job/thiết bị.', 'error'));
+    if (activeTab === 'stocktake') fetchStocktakes().then(setStocktakes).catch(err => showNotification(err.response?.data?.error || 'Không tải được lịch sử kiểm kê.', 'error')); 
   }, [currentUser, activeTab]);
 
   const handleCreateJob = async (e) => {
@@ -177,9 +182,15 @@ export default function App() {
     catch (err) { showNotification(err.response?.data?.error || 'Không đăng ký được thiết bị.', 'error'); }
   };
   const handleAssetReturn = async (asset) => {
+    const returnedBy = window.prompt('Người bàn giao thiết bị về kho là ai?', '') || '';
+    if (returnedBy.trim().length < 2) { showNotification('Cần nhập người bàn giao thiết bị về kho.', 'error'); return; }
+    const receivedBy = window.prompt('Nhân sự kho xác nhận nhận lại thiết bị là ai?', currentUser?.fullName || '') || '';
+    if (receivedBy.trim().length < 2) { showNotification('Cần nhập người xác nhận nhận lại thiết bị.', 'error'); return; }
     const condition = window.prompt('Tình trạng khi hoàn kho: Tốt, Cần kiểm tra, hoặc Hư hỏng', 'Tốt');
     if (!condition) return;
-    try { await returnAsset(asset._id, { condition }); setAssets(prev => prev.map(a => a._id === asset._id ? { ...a, status: condition === 'Hư hỏng' ? 'maintenance' : 'available', currentJob: null, condition } : a)); showNotification('Đã cập nhật hoàn kho thiết bị.'); }
+    if (!['Tốt', 'Cần kiểm tra', 'Hư hỏng'].includes(condition.trim())) { showNotification('Tình trạng không hợp lệ.', 'error'); return; }
+    const note = window.prompt('Ghi chú tình trạng / phụ kiện thiếu (nếu có):', '') || '';
+    try { const updated = await returnAsset(asset._id, { condition: condition.trim(), returnedBy: returnedBy.trim(), receivedBy: receivedBy.trim(), note }); setAssets(prev => prev.map(a => a._id === asset._id ? { ...a, ...updated, currentJob: null } : a)); showNotification('Đã lưu xác nhận thu hồi thiết bị và lịch sử bàn giao.'); }
     catch (err) { showNotification(err.response?.data?.error || 'Không hoàn kho được.', 'error'); }
   };
 
@@ -392,8 +403,8 @@ const getCurrentFormattedDate = () => {
 
   const handleOutboundSubmit = async (e) => {
     e.preventDefault();
-    if (!outboundForm.selectedSku || outboundForm.quantity <= 0) {
-      showNotification('Vui lòng chọn hàng hóa và nhập số lượng xuất hợp lệ.', 'error');
+    if (!outboundForm.selectedSku || outboundForm.quantity <= 0 || !String(outboundForm.receiver || '').trim() || !receiverConfirmed) {
+      showNotification('Vui lòng chọn hàng hóa, ghi người nhận và xác nhận bàn giao trước khi xuất kho.', 'error');
       return;
     }
 
@@ -422,6 +433,7 @@ const getCurrentFormattedDate = () => {
         condition: outboundForm.condition,
         receiverDepartment: outboundForm.department,
         receiverName: outboundForm.receiver,
+        receiverConfirmed: true,
         executor: outboundForm.executor,
         note: outboundForm.note,
         photoUrl: outboundForm.photo
@@ -429,6 +441,7 @@ const getCurrentFormattedDate = () => {
 
       await submitOutboundTicket(targetTicket._id, payload);
       setSelectedAssetIds([]);
+      setReceiverConfirmed(false);
       // Clear form text after a successful add so the next outbound starts fresh.
       setOutboundForm({
         orderCode: 'OUT-' + Math.floor(10000 + Math.random() * 90000),
@@ -446,7 +459,26 @@ const getCurrentFormattedDate = () => {
     }
   };
 
-const handleExportCSV = () => {
+const handleCreateStocktake = async (e) => {
+    e.preventDefault();
+    const lines = stocktakeInventory.map(item => {
+      const raw = stocktakeCounts[item.sku];
+      const countedQuantity = raw === undefined || raw === '' ? Number(item.quantity) || 0 : Number(raw);
+      return { sku: item.sku, itemName: item.name, systemQuantity: Number(item.quantity) || 0, countedQuantity, note: '' };
+    });
+    if (!lines.length) { showNotification('Chưa có mặt hàng để kiểm kê.', 'error'); return; }
+    if (lines.some(line => !Number.isFinite(line.countedQuantity) || line.countedQuantity < 0)) { showNotification('Số lượng thực tế phải là số không âm.', 'error'); return; }
+    try {
+      setLoading(true);
+      const created = await createStocktake({ ...stocktakeForm, lines });
+      setStocktakes(prev => [created, ...prev]);
+      setStocktakeForm({ location: 'Toàn kho', note: '' }); setStocktakeCounts({});
+      showNotification(`Đã lưu ${created.stocktakeCode}. Biên bản ghi nhận chênh lệch, không tự động chỉnh tồn kho.`, 'success');
+    } catch (err) { showNotification(err.response?.data?.error || 'Không thể lưu biên bản kiểm kê.', 'error'); }
+    finally { setLoading(false); }
+  };
+
+  const handleExportCSV = () => {
     // Biến csvContent được khai báo cục bộ CHÍNH XÁC BÊN TRONG HÀM NÀY
     let csvContent = "\uFEFFID,SKU,TenHang,DanhMuc,SoLuong,DonVi,TinhTrang,KhuVuc,DuAn,PhongBan,NgayNhap,LinkAnh\n";
     
@@ -475,6 +507,18 @@ const handleExportCSV = () => {
   };
   
   
+  const stocktakeInventory = useMemo(() => {
+    const map = new Map();
+    inventory.forEach(item => {
+      const key = String(item.sku || '').toUpperCase();
+      if (!map.has(key)) map.set(key, { ...item, id: key, quantity: 0 });
+      const row = map.get(key);
+      row.quantity += Number(item.quantity) || 0;
+      if (!row.name && item.name) row.name = item.name;
+    });
+    return Array.from(map.values());
+  }, [inventory]);
+
   // Tổng số lượng hàng đang tồn kho (cộng số lượng của tất cả SKU).
   const totalItemsCount = useMemo(() => {
     return inventory.reduce((total, item) => total + (Number(item.quantity) || 0), 0);
@@ -724,6 +768,10 @@ const handleExportCSV = () => {
               )}
             </button>
 
+            <button onClick={() => { setActiveTab('stocktake'); setMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all ${activeTab === 'stocktake' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}>
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" /><span>Kiểm kê & Đối soát</span>
+            </button>
+
             <button onClick={() => { setActiveTab('jobs'); setMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all ${activeTab === 'jobs' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}>
               <Briefcase className="w-4 h-4" /><span>Job/Event & Thiết bị</span>
             </button>
@@ -776,6 +824,7 @@ const handleExportCSV = () => {
               {activeTab === 'inventory' && '📦 Danh Mục Quản Lý Tồn Kho P2P'}
               {activeTab === 'logs' && '📋 Nhật Ký Giao Nhận P2P & Audit Trail'}
               {activeTab === 'jobs' && '🗓️ Quản Lý Job/Event & Thiết Bị Theo Mã Riêng'}
+              {activeTab === 'stocktake' && '🧾 Kiểm Kê & Đối Soát Tồn Kho'}
               {activeTab === 'users' && '🛡️ Quản Lý Tài Khoản & Phân Quyền'}
             </h2>
             <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
@@ -871,6 +920,20 @@ const handleExportCSV = () => {
                 <p className={`text-xs mt-3 font-medium ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
                   Thuộc {uniqueDeptsCount} phòng ban gửi kho
                 </p>
+              </div>
+            </div>
+
+            <div className={`rounded-2xl border p-5 ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'}`}>
+              <div className="flex items-center justify-between gap-3 mb-4"><h3 className="font-bold flex items-center gap-2"><AlertTriangle className="w-5 h-5 text-amber-500"/> Cảnh báo vận hành kho</h3><button onClick={() => { loadData(); Promise.all([fetchJobs(), fetchAssets()]).then(([j,a])=>{setJobs(j);setAssets(a);}); }} className="text-xs text-indigo-500 flex items-center gap-1"><RefreshCw className="w-3 h-3"/> Làm mới</button></div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+                <div className="rounded-xl bg-amber-500/10 p-4"><p className="text-xs text-slate-500">SKU chạm định mức tối thiểu</p><p className="text-2xl font-bold text-amber-600">{lowStockCount}</p></div>
+                <div className="rounded-xl bg-rose-500/10 p-4"><p className="text-xs text-slate-500">Thiết bị đang ở Job/Event</p><p className="text-2xl font-bold text-rose-600">{assets.filter(a=>a.status==='assigned').length}</p></div>
+                <div className="rounded-xl bg-orange-500/10 p-4"><p className="text-xs text-slate-500">Thiết bị cần kiểm tra / hư hỏng</p><p className="text-2xl font-bold text-orange-600">{assets.filter(a=>a.condition==='Cần kiểm tra'||a.condition==='Hư hỏng'||a.status==='maintenance').length}</p></div>
+              </div>
+              <div className="space-y-2">
+                {inventory.filter(i => Number(i.quantity) <= Number(i.minStock ?? 5)).slice(0,5).map(i=><div key={i.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/20 px-3 py-2 text-xs"><span><b>{i.name}</b> <span className="text-slate-500">({i.sku})</span></span><span className="font-semibold text-amber-600">Còn {i.quantity} {i.unit} · Định mức {i.minStock ?? 5}</span></div>)}
+                {assets.filter(a=>a.status==='assigned').slice(0,5).map(a=><div key={a._id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-rose-500/20 px-3 py-2 text-xs"><span><b>{a.assetCode} — {a.name}</b></span><span className="text-rose-600">Đang ở {a.currentJob?.jobCode || 'Job chưa gắn mã'}</span></div>)}
+                {lowStockCount===0 && !assets.some(a=>a.status==='assigned') && !assets.some(a=>a.condition==='Cần kiểm tra'||a.condition==='Hư hỏng'||a.status==='maintenance') && <p className="text-sm text-emerald-600">Chưa có cảnh báo theo các điều kiện hiện tại.</p>}
               </div>
             </div>
 
@@ -1476,6 +1539,11 @@ const handleExportCSV = () => {
                 )}
               </div>
 
+              <label className={`flex items-start gap-3 rounded-xl border p-3 text-xs ${darkMode ? 'border-emerald-900 bg-emerald-950/30 text-slate-200' : 'border-emerald-200 bg-emerald-50 text-slate-800'}`}>
+                <input type="checkbox" checked={receiverConfirmed} onChange={e => setReceiverConfirmed(e.target.checked)} className="mt-0.5" />
+                <span><b>Người nhận xác nhận bàn giao</b><br />Xác nhận đã nhận đúng số lượng và tình trạng ghi trên phiếu. Hệ thống lưu tên người nhận, người thực hiện, thời điểm và ảnh chứng từ nếu có.</span>
+              </label>
+
               <div className="pt-2 flex justify-end">
                 <button
                   type="submit"
@@ -1618,6 +1686,18 @@ const handleExportCSV = () => {
                 </table>
               </div>
             </div>
+          </div>
+        )}
+
+        {activeTab === 'stocktake' && (
+          <div className="space-y-5">
+            <form onSubmit={handleCreateStocktake} className={`rounded-2xl border p-5 ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'}`}>
+              <div className="flex flex-wrap items-start justify-between gap-3 mb-4"><div><h3 className="font-bold text-lg">Tạo biên bản kiểm kê</h3><p className="text-xs text-slate-500 mt-1">Điền số lượng thực tế từng SKU. Dòng chưa sửa sẽ mặc định bằng tồn hệ thống.</p></div><span className="text-xs rounded-full bg-indigo-500/10 text-indigo-500 px-3 py-1">{stocktakeInventory.length} SKU</span></div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4"><input value={stocktakeForm.location} onChange={e=>setStocktakeForm(v=>({...v,location:e.target.value}))} placeholder="Khu vực kiểm kê" className="rounded-xl border p-3 bg-transparent text-sm"/><input value={stocktakeForm.note} onChange={e=>setStocktakeForm(v=>({...v,note:e.target.value}))} placeholder="Ghi chú / lý do kiểm kê" className="rounded-xl border p-3 bg-transparent text-sm"/></div>
+              <div className="overflow-x-auto"><table className="w-full text-sm text-left"><thead><tr className="border-b"><th className="p-2">SKU</th><th className="p-2">Mặt hàng</th><th className="p-2">Tồn hệ thống</th><th className="p-2">Thực tế</th><th className="p-2">Chênh lệch</th></tr></thead><tbody>{stocktakeInventory.map(item=>{const countValue=stocktakeCounts[item.sku] ?? String(item.quantity); const diff=Number(countValue||0)-Number(item.quantity||0); return <tr key={item.id} className="border-b border-slate-200/20"><td className="p-2 font-mono">{item.sku}</td><td className="p-2">{item.name}</td><td className="p-2">{item.quantity} {item.unit}</td><td className="p-2"><input type="number" min="0" step="any" value={countValue} onChange={e=>setStocktakeCounts(prev=>({...prev,[item.sku]:e.target.value}))} className="w-28 rounded-lg border p-2 bg-transparent"/></td><td className={`p-2 font-bold ${diff===0?'text-emerald-600': 'text-rose-600'}`}>{diff>0?'+':''}{diff}</td></tr>})}</tbody></table></div>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-slate-500">Biên bản chỉ ghi nhận kết quả và chênh lệch; không tự ý thay đổi tồn kho.</p><button disabled={loading||!stocktakeInventory.length} className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white disabled:opacity-50">Lưu biên bản kiểm kê</button></div>
+            </form>
+            <div className={`rounded-2xl border p-5 ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'}`}><h3 className="font-bold mb-4">Lịch sử kiểm kê ({stocktakes.length})</h3>{stocktakes.length===0?<p className="text-sm text-slate-500">Chưa có biên bản kiểm kê.</p>:<div className="space-y-3">{stocktakes.map(row=><div key={row._id} className="rounded-xl border border-slate-200/30 p-4"><div className="flex flex-wrap justify-between gap-2"><b>{row.stocktakeCode} · {row.location}</b><span className="text-xs text-slate-500">{new Date(row.createdAt).toLocaleString()}</span></div><p className="text-xs text-slate-500 mt-1">Thực hiện: {row.createdByName || '—'} · {row.totalLines} dòng · <span className={row.discrepancyLines?'text-rose-500':'text-emerald-600'}>{row.discrepancyLines} dòng chênh lệch</span></p>{row.note&&<p className="text-xs mt-2">{row.note}</p>}<details className="mt-3"><summary className="cursor-pointer text-xs text-indigo-500">Xem chi tiết đối soát</summary><div className="mt-2 overflow-x-auto"><table className="w-full text-xs"><thead><tr><th className="p-2 text-left">SKU</th><th className="p-2 text-left">Mặt hàng</th><th className="p-2 text-right">Hệ thống</th><th className="p-2 text-right">Thực tế</th><th className="p-2 text-right">Lệch</th></tr></thead><tbody>{row.lines.map((line,idx)=><tr key={idx} className="border-t"><td className="p-2">{line.sku}</td><td className="p-2">{line.itemName}</td><td className="p-2 text-right">{line.systemQuantity}</td><td className="p-2 text-right">{line.countedQuantity}</td><td className={`p-2 text-right font-bold ${line.difference?'text-rose-600':'text-emerald-600'}`}>{line.difference>0?'+':''}{line.difference}</td></tr>)}</tbody></table></div></details></div>)}</div>}</div>
           </div>
         )}
 

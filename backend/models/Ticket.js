@@ -6,9 +6,15 @@ const ExportLogSchema = new mongoose.Schema({
   condition: { type: String, required: true },
   receiverDepartment: { type: String, required: true },
   receiverName: { type: String },
+  receiverConfirmed: { type: Boolean, default: false },
+  receiverConfirmedAt: { type: Date },
   executor: { type: String, required: true },
   transportUnit: { type: String },
   photoUrl: { type: String },
+  jobId: { type: mongoose.Schema.Types.ObjectId, ref: 'Job', default: null },
+  jobCode: { type: String, default: '' },
+  jobName: { type: String, default: '' },
+  assetIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Asset' }],
   note: { type: String },
   timestamp: { type: Date, default: Date.now }
 });

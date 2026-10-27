@@ -1,4 +1,14 @@
 const mongoose = require('mongoose');
+const ReturnLogSchema = new mongoose.Schema({
+  returnedBy: { type: String, default: '' },
+  receivedBy: { type: String, default: '' },
+  condition: { type: String, enum: ['Tốt', 'Cần kiểm tra', 'Hư hỏng'], required: true },
+  note: { type: String, default: '', maxlength: 2000 },
+  photoUrl: { type: String, default: '' },
+  jobCode: { type: String, default: '' },
+  timestamp: { type: Date, default: Date.now },
+  executorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+}, { _id: false });
 const AssetSchema = new mongoose.Schema({
   assetCode: { type: String, required: true, unique: true, trim: true, uppercase: true },
   name: { type: String, required: true, trim: true, maxlength: 200 },
@@ -11,6 +21,7 @@ const AssetSchema = new mongoose.Schema({
   currentJob: { type: mongoose.Schema.Types.ObjectId, ref: 'Job', default: null },
   sourceTicket: { type: mongoose.Schema.Types.ObjectId, ref: 'Ticket', default: null },
   notes: { type: String, default: '', maxlength: 2000 },
+  returnLogs: { type: [ReturnLogSchema], default: [] },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
 }, { timestamps: true });
 AssetSchema.index({ sku: 1, status: 1 });

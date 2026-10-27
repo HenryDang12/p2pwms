@@ -7,6 +7,7 @@ const Ticket = require('./models/Ticket');
 const Job = require('./models/Job');
 const Asset = require('./models/Asset');
 const AuditLog = require('./models/AuditLog');
+const Stocktake = require('./models/Stocktake');
 const authRoutes = require('./routes/auth.routes');
 const { authenticate, authorize } = require('./middleware/auth');
 
@@ -131,6 +132,9 @@ app.post('/api/tickets/:id/outbound', authorize('admin', 'manager', 'warehouse')
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: 'ID phiếu kho không hợp lệ.' });
     const exportQty = Number(req.body.quantity);
+    const receiverName = String(req.body.receiverName || '').trim();
+    if (receiverName.length < 2) return res.status(400).json({ error: 'Cần ghi rõ người nhận hàng để xác nhận bàn giao.' });
+    if (req.body.receiverConfirmed !== true) return res.status(400).json({ error: 'Người nhận phải xác nhận đã nhận bàn giao.' });
     if (!Number.isFinite(exportQty) || exportQty <= 0) return res.status(400).json({ error: 'Số lượng xuất phải lớn hơn 0.' });
 
     const jobId = req.body.jobId || null;
@@ -165,7 +169,9 @@ app.post('/api/tickets/:id/outbound', authorize('admin', 'manager', 'warehouse')
           quantity: exportQty,
           condition: String(req.body.condition || 'Tốt').slice(0, 100),
           receiverDepartment: String(req.body.receiverDepartment || 'Vận hành').slice(0, 120),
-          receiverName: String(req.body.receiverName || '').slice(0, 120),
+          receiverName: receiverName.slice(0, 120),
+          receiverConfirmed: true,
+          receiverConfirmedAt: new Date(),
           executor: req.user.fullName,
           transportUnit: String(req.body.transportUnit || '').slice(0, 120),
           note: String(req.body.note || '').slice(0, 2000),
@@ -304,8 +310,19 @@ app.post('/api/assets/:id/return', authenticate, authorize('admin', 'manager', '
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: 'ID thiết bị không hợp lệ.' });
     const condition = ['Tốt','Cần kiểm tra','Hư hỏng'].includes(req.body.condition) ? req.body.condition : 'Tốt';
-    const asset = await Asset.findOneAndUpdate({ _id: req.params.id, status: 'assigned' }, { $set: { status: condition === 'Hư hỏng' ? 'maintenance' : 'available', condition, currentJob: null, location: String(req.body.location || 'Kho P2P').slice(0,160) } }, { new: true });
-    if (!asset) return res.status(409).json({ error: 'Thiết bị không ở trạng thái đang xuất/đang gán Job.' });
+    const receivedBy = String(req.body.receivedBy || '').trim();
+    if (receivedBy.length < 2) return res.status(400).json({ error: 'Cần ghi rõ người nhận lại thiết bị tại kho.' });
+    const returnedBy = String(req.body.returnedBy || '').trim();
+    const note = String(req.body.note || '').slice(0, 2000);
+    const photoUrl = typeof req.body.photoUrl === 'string' ? req.body.photoUrl : '';
+    const existing = await Asset.findOne({ _id: req.params.id, status: 'assigned' }).populate('currentJob', 'jobCode');
+    if (!existing) return res.status(409).json({ error: 'Thiết bị không ở trạng thái đang xuất/đang gán Job.' });
+    const returnJobCode = existing.currentJob?.jobCode || '';
+    existing.status = condition === 'Hư hỏng' ? 'maintenance' : 'available';
+    existing.condition = condition; existing.currentJob = null; existing.location = String(req.body.location || 'Kho P2P').slice(0,160);
+    existing.returnLogs.push({ returnedBy, receivedBy, condition, note, photoUrl, jobCode: returnJobCode, executorId: req.user._id, timestamp: new Date() });
+    const asset = existing;
+    await asset.save();
     if (asset.sourceTicket) {
       const ticket = await Ticket.findById(asset.sourceTicket);
       if (ticket) { ticket.totalExportedQuantity = Math.max(0, Number(ticket.totalExportedQuantity || 0) - 1); ticket.status = ticket.totalExportedQuantity <= 0 ? 'Đang lưu kho' : (ticket.totalExportedQuantity >= ticket.inbound.quantity ? 'Đã xuất hết' : 'Đã xuất kho một phần'); await ticket.save(); }
@@ -313,6 +330,29 @@ app.post('/api/assets/:id/return', authenticate, authorize('admin', 'manager', '
     }
     await writeAudit(req, 'asset.returned', 'asset', asset._id, { condition }); res.json(asset);
   } catch (err) { res.status(400).json({ error: 'Không thể hoàn kho thiết bị.' }); }
+});
+
+// Kiểm kê: lưu biên bản đối soát, không tự ý điều chỉnh tồn kho.
+app.get('/api/stocktakes', authenticate, async (req, res) => {
+  try { const rows = await Stocktake.find({}).sort({ createdAt: -1 }).limit(100).lean(); res.json(rows); }
+  catch (err) { res.status(500).json({ error: 'Không thể tải lịch sử kiểm kê.' }); }
+});
+app.post('/api/stocktakes', authenticate, authorize('admin', 'manager', 'warehouse'), async (req, res) => {
+  try {
+    const lines = Array.isArray(req.body.lines) ? req.body.lines : [];
+    if (!lines.length || lines.length > 2000) return res.status(400).json({ error: 'Biên bản cần có từ 1 đến 2.000 dòng kiểm kê.' });
+    const normalized = lines.map((line) => {
+      const sku = String(line.sku || '').trim().toUpperCase();
+      const itemName = String(line.itemName || '').trim();
+      const systemQuantity = Number(line.systemQuantity); const countedQuantity = Number(line.countedQuantity);
+      if (!sku || !itemName || !Number.isFinite(systemQuantity) || systemQuantity < 0 || !Number.isFinite(countedQuantity) || countedQuantity < 0) throw new Error('Dữ liệu kiểm kê không hợp lệ.');
+      return { sku, itemName: itemName.slice(0,200), systemQuantity, countedQuantity, difference: countedQuantity-systemQuantity, note: String(line.note || '').slice(0,1000) };
+    });
+    const count = await Stocktake.countDocuments();
+    const stocktake = await Stocktake.create({ stocktakeCode: `KK-${new Date().getFullYear()}-${String(count+1).padStart(5,'0')}`, location: String(req.body.location || 'Toàn kho').slice(0,160), note: String(req.body.note || '').slice(0,2000), lines: normalized, totalLines: normalized.length, discrepancyLines: normalized.filter(x => x.difference !== 0).length, createdBy: req.user._id, createdByName: req.user.fullName });
+    await writeAudit(req, 'stocktake.created', 'stocktake', stocktake._id, { stocktakeCode: stocktake.stocktakeCode, totalLines: stocktake.totalLines, discrepancyLines: stocktake.discrepancyLines });
+    res.status(201).json(stocktake);
+  } catch (err) { res.status(400).json({ error: err.message || 'Không thể lưu biên bản kiểm kê.' }); }
 });
 
 // Chỉ Admin/Quản lý xem audit log toàn hệ thống.
