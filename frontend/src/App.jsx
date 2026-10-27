@@ -156,27 +156,66 @@ export default function App() {
 
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraTarget, setCameraTarget] = useState(null);
+  const [cameraFacingMode, setCameraFacingMode] = useState('environment');
+  const [cameraStream, setCameraStream] = useState(null);
+  const [notification, setNotification] = useState(null);
   const videoRef = useRef(null);
 
-  const startCamera = async (target) => {
-    setCameraTarget(target);
-    setIsCameraActive(true);
-    try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-      }
-    } catch (err) {
-      console.warn("Camera fallback", err);
+  const showNotification = (message, type = 'success') => {
+    setNotification({ message: String(message), type });
+    window.clearTimeout(showNotification.timer);
+    showNotification.timer = window.setTimeout(() => setNotification(null), 4200);
+  };
+
+  useEffect(() => {
+    if (videoRef.current && cameraStream) {
+      videoRef.current.srcObject = cameraStream;
+      videoRef.current.play?.().catch(() => {});
     }
+  }, [cameraStream, isCameraActive]);
+
+  const startCamera = async (target, facingMode = cameraFacingMode) => {
+    // Dừng luồng cũ trước khi đổi camera để tránh camera bị chiếm dụng.
+    if (cameraStream) cameraStream.getTracks().forEach(track => track.stop());
+    setCameraTarget(target);
+    setCameraFacingMode(facingMode);
+    setIsCameraActive(true);
+
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('Trình duyệt không hỗ trợ camera. Hãy dùng Chrome/Edge và HTTPS hoặc localhost.');
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: facingMode },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      });
+      setCameraStream(stream);
+    } catch (err) {
+      setIsCameraActive(false);
+      setCameraStream(null);
+      showNotification(
+        err.name === 'NotAllowedError'
+          ? 'Bạn chưa cấp quyền camera. Hãy cho phép camera trong thanh địa chỉ trình duyệt rồi thử lại.'
+          : `Không mở được camera: ${err.message || 'Vui lòng kiểm tra thiết bị camera.'}`,
+        'error'
+      );
+    }
+  };
+
+  const switchCamera = async () => {
+    if (!cameraTarget) return;
+    const nextFacingMode = cameraFacingMode === 'user' ? 'environment' : 'user';
+    await startCamera(cameraTarget, nextFacingMode);
   };
 
   const capturePhoto = () => {
     const video = videoRef.current;
     if (!video || !video.srcObject || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
-      alert('Camera chưa sẵn sàng. Vui lòng bật camera và thử lại.');
+      showNotification('Camera chưa sẵn sàng. Vui lòng đợi hình ảnh xuất hiện rồi chụp lại.', 'error');
       return;
     }
 
@@ -185,12 +224,17 @@ export default function App() {
     canvas.height = video.videoHeight;
     const context = canvas.getContext('2d');
     if (!context) {
-      alert('Không thể xử lý ảnh từ camera. Vui lòng tải ảnh lên từ thiết bị.');
+      showNotification('Không xử lý được ảnh. Bạn có thể tải ảnh từ thiết bị lên thay thế.', 'error');
       return;
     }
 
+    // Camera trước được lật gương để ảnh chụp khớp với phần xem trước.
+    if (cameraFacingMode === 'user') {
+      context.translate(canvas.width, 0);
+      context.scale(-1, 1);
+    }
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const photoDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    const photoDataUrl = canvas.toDataURL('image/jpeg', 0.9);
 
     if (cameraTarget === 'inbound') {
       setInboundForm(prev => ({ ...prev, photo: photoDataUrl }));
@@ -198,6 +242,7 @@ export default function App() {
       setOutboundForm(prev => ({ ...prev, photo: photoDataUrl }));
     }
     stopCamera();
+    showNotification('Đã chụp và đính kèm ảnh thành công.');
   };
 
   const handleFileUpload = (e, target) => {
@@ -213,10 +258,10 @@ export default function App() {
   };
 
   const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const tracks = videoRef.current.srcObject.getTracks();
-      tracks.forEach(track => track.stop());
-    }
+    const stream = cameraStream || videoRef.current?.srcObject;
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setCameraStream(null);
     setIsCameraActive(false);
     setCameraTarget(null);
   };
@@ -236,7 +281,7 @@ const getCurrentFormattedDate = () => {
   const handleInboundSubmit = async (e) => {
     e.preventDefault();
     if (!inboundForm.sku || !inboundForm.name || inboundForm.quantity <= 0) {
-      alert("Vui lòng điền đầy đủ thông tin bắt buộc!");
+      showNotification('Vui lòng điền đầy đủ thông tin bắt buộc.', 'error');
       return;
     }
 
@@ -259,11 +304,11 @@ const getCurrentFormattedDate = () => {
       };
 
       await createInboundTicket(payload);
-      alert("✅ Nhập kho thành công và đã lưu lên MongoDB Atlas!");
+      showNotification('Nhập kho thành công. Dữ liệu đã được gửi lên hệ thống.', 'success');
       loadData();
       setActiveTab('overview');
     } catch (err) {
-      alert("❌ Lỗi khi lưu vào MongoDB: " + (err.response?.data?.error || err.message));
+      showNotification('Không thể lưu phiếu nhập: ' + (err.response?.data?.error || err.message), 'error');
     } finally {
       setLoading(false);
     }
@@ -272,7 +317,7 @@ const getCurrentFormattedDate = () => {
   const handleOutboundSubmit = async (e) => {
     e.preventDefault();
     if (!outboundForm.selectedSku || outboundForm.quantity <= 0) {
-      alert("Vui lòng chọn mã sản phẩm và nhập số lượng xuất hợp lệ!");
+      showNotification('Vui lòng chọn hàng hóa và nhập số lượng xuất hợp lệ.', 'error');
       return;
     }
 
@@ -283,13 +328,13 @@ const getCurrentFormattedDate = () => {
       const targetTicket = allRawTickets.find(t => (t.sku === outboundForm.selectedSku || t.inbound?.sku === outboundForm.selectedSku));
 
       if (!targetTicket) {
-        alert("Sản phẩm không tồn tại trong cơ sở dữ liệu!");
+        showNotification('Không tìm thấy sản phẩm trong cơ sở dữ liệu.', 'error');
         return;
       }
 
       const availableQty = (Number(targetTicket.inbound?.quantity) || 0) - (Number(targetTicket.totalExportedQuantity) || 0);
       if (Number(outboundForm.quantity) > availableQty) {
-        alert(`Số lượng xuất (${outboundForm.quantity}) vượt tồn kho hiện tại (${availableQty}).`);
+        showNotification(`Số lượng xuất (${outboundForm.quantity}) vượt tồn kho hiện tại (${availableQty}).`, 'error');
         return;
       }
 
@@ -304,11 +349,11 @@ const getCurrentFormattedDate = () => {
       };
 
       await submitOutboundTicket(targetTicket._id, payload);
-      alert("✅ Xuất kho thành công và cập nhật lên MongoDB Atlas!");
+      showNotification('Xuất kho thành công. Tồn kho đã được cập nhật.', 'success');
       loadData();
       setActiveTab('overview');
     } catch (err) {
-      alert("❌ Lỗi xuất kho: " + (err.response?.data?.error || err.message));
+      showNotification('Không thể lưu phiếu xuất: ' + (err.response?.data?.error || err.message), 'error');
     } finally {
       setLoading(false);
     }
@@ -919,9 +964,9 @@ const handleExportCSV = () => {
                     onChange={e => setInboundForm({ ...inboundForm, department: e.target.value })}
                     className={`w-full px-3.5 py-2.5 rounded-xl border focus:ring-2 focus:ring-indigo-500 outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
                   >
-                    <option value="Marketing">Marketing</option>
-                    <option value="Kỹ thuật">Kỹ thuật</option>
-                    <option value="Sự kiện">Sự kiện</option>
+                    <option value="Marketing">Marketing CS</option>.
+                    <option value="Fop">Operation</option>
+                    <option value="Client Service">Client Service</option>
                     <option value="Mua hàng (Purchasing)">Mua hàng (Purchasing)</option>
                   </select>
                 </div>
@@ -970,9 +1015,16 @@ const handleExportCSV = () => {
                 {isCameraActive && cameraTarget === 'inbound' ? (
                   <div className="space-y-3">
                     <div className="relative aspect-video max-w-md mx-auto bg-black rounded-lg overflow-hidden flex items-center justify-center">
-                      <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+                      <video ref={videoRef} autoPlay playsInline muted className={`w-full h-full object-cover ${cameraFacingMode === 'user' ? '-scale-x-100' : ''}`} />
                     </div>
                     <div className="flex justify-center gap-2">
+                      <button
+                        type="button"
+                        onClick={switchCamera}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-medium text-xs rounded-lg flex items-center gap-2"
+                      >
+                        <RefreshCw className="w-4 h-4" /> Đổi {cameraFacingMode === 'user' ? 'sang camera sau' : 'sang camera trước'}
+                      </button>
                       <button
                         type="button"
                         onClick={capturePhoto}
@@ -1141,9 +1193,16 @@ const handleExportCSV = () => {
                 {isCameraActive && cameraTarget === 'outbound' ? (
                   <div className="space-y-3">
                     <div className="relative aspect-video max-w-md mx-auto bg-black rounded-lg overflow-hidden flex items-center justify-center">
-                      <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+                      <video ref={videoRef} autoPlay playsInline muted className={`w-full h-full object-cover ${cameraFacingMode === 'user' ? '-scale-x-100' : ''}`} />
                     </div>
                     <div className="flex justify-center gap-2">
+                      <button
+                        type="button"
+                        onClick={switchCamera}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-medium text-xs rounded-lg flex items-center gap-2"
+                      >
+                        <RefreshCw className="w-4 h-4" /> Đổi {cameraFacingMode === 'user' ? 'sang camera sau' : 'sang camera trước'}
+                      </button>
                       <button
                         type="button"
                         onClick={capturePhoto}
@@ -1234,9 +1293,10 @@ const handleExportCSV = () => {
                   className={`px-3 py-2 rounded-xl border outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
                 >
                   <option value="ALL">Tất cả Phòng Ban</option>
-                  <option value="Marketing">Marketing</option>
-                  <option value="Kỹ thuật">Kỹ thuật</option>
+                  <option value="Production">Production</option>
+                  <option value="Fop">Operation</option>
                   <option value="Sự kiện">Sự kiện</option>
+                  <option value="Client Service">Client Service</option>
                 </select>
 
                 <select
@@ -1406,6 +1466,29 @@ const handleExportCSV = () => {
         )}
 
       </main>
+
+      {notification && (
+        <div className="fixed top-5 right-5 z-[100] w-[min(92vw,390px)] animate-in slide-in-from-top-2">
+          <div className={`flex items-start gap-3 rounded-2xl border p-4 shadow-2xl backdrop-blur-xl ${
+            notification.type === 'error'
+              ? 'border-rose-200 bg-white text-slate-800'
+              : 'border-emerald-200 bg-white text-slate-800'
+          }`}>
+            <div className={`mt-0.5 rounded-full p-1.5 ${
+              notification.type === 'error' ? 'bg-rose-100 text-rose-600' : 'bg-emerald-100 text-emerald-600'
+            }`}>
+              {notification.type === 'error' ? <AlertCircle className="h-5 w-5" /> : <CheckCircle2 className="h-5 w-5" />}
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-bold">{notification.type === 'error' ? 'Có vấn đề xảy ra' : 'Thao tác thành công'}</p>
+              <p className="mt-1 break-words text-xs leading-relaxed text-slate-600">{notification.message}</p>
+            </div>
+            <button type="button" onClick={() => setNotification(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700" aria-label="Đóng thông báo">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* --- LIGHTBOX MODAL FOR IMAGE PREVIEW --- */}
       {activePhotoModal && (
