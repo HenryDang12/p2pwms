@@ -373,7 +373,14 @@ const getCurrentFormattedDate = () => {
       };
 
       await createInboundTicket(payload);
-      showNotification('Nhập kho thành công. Dữ liệu đã được gửi lên hệ thống.', 'success');
+      // Clear form text after a successful add so old values are not reused accidentally.
+      setInboundForm({
+        orderCode: 'IN-' + Math.floor(10000 + Math.random() * 90000),
+        sku: '', name: '', category: 'Vật tư Marketing', quantity: 1, unit: 'Cái',
+        minStock: 5, condition: 'Mới 100%', supplier: '', project: '', jobId: '',
+        department: 'Marketing', keeper: '', zone: '', storageDays: 60, note: '', photo: null
+      });
+      showNotification('Nhập kho thành công. Đã xóa nội dung biểu mẫu để nhập phiếu mới.', 'success');
       loadData();
       setActiveTab('overview');
     } catch (err) {
@@ -422,7 +429,14 @@ const getCurrentFormattedDate = () => {
 
       await submitOutboundTicket(targetTicket._id, payload);
       setSelectedAssetIds([]);
-      showNotification('Xuất kho thành công. Tồn kho và Job/Event đã được cập nhật.', 'success');
+      // Clear form text after a successful add so the next outbound starts fresh.
+      setOutboundForm({
+        orderCode: 'OUT-' + Math.floor(10000 + Math.random() * 90000),
+        selectedSku: '', quantity: 1, condition: 'Tốt / Đã đóng gói', receiver: '',
+        project: '', jobId: '', department: 'Marketing', approver: '', executor: '',
+        note: '', photo: null
+      });
+      showNotification('Xuất kho thành công. Tồn kho và Job/Event đã được cập nhật; biểu mẫu đã được xóa.', 'success');
       loadData();
       setActiveTab('overview');
     } catch (err) {
