@@ -5,13 +5,13 @@ import {
   AlertTriangle, Clock, RefreshCw, Filter, User, Building2, Briefcase, 
   Calendar, ShieldAlert, Tag, Image as ImageIcon, MapPin, X, Sun, Moon,
   TrendingUp, PackageCheck, AlertCircle, FileText, PieChart as PieIcon,
-  TrendingDown, RotateCcw, Check, Sparkles, Menu
+  TrendingDown, RotateCcw, Check, Sparkles, Menu, LogOut, LockKeyhole, Users, UserPlus, ShieldCheck
 } from 'lucide-react';
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   BarChart, Bar, Legend, PieChart, Pie, Cell
 } from 'recharts';
-import { fetchTickets, createInboundTicket, submitOutboundTicket, updateTicket, deleteTicket } from './api';
+import { fetchTickets, createInboundTicket, submitOutboundTicket, updateTicket, deleteTicket, login, getCurrentUser, logout, getAccessToken, setAccessToken, fetchUsers, createUser, updateUser } from './api';
 
 const COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4'];
 
@@ -20,6 +20,15 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(false);
   const [loading, setLoading] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [loginForm, setLoginForm] = useState({ email: '', password: '' });
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState('');
+  const [usersList, setUsersList] = useState([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [userForm, setUserForm] = useState({ fullName: '', email: '', password: '', role: 'production' });
+  const [userFormError, setUserFormError] = useState('');
 
   const [inventory, setInventory] = useState([]);
   const [logs, setLogs] = useState([]);
@@ -113,8 +122,39 @@ export default function App() {
   };
 
   useEffect(() => {
-    loadData();
+    let mounted = true;
+    const onSessionExpired = () => {
+      if (!mounted) return;
+      setCurrentUser(null);
+      setAuthReady(true);
+      setLoginError('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+    };
+    window.addEventListener('p2p-wms-session-expired', onSessionExpired);
+    (async () => {
+      try {
+        if (getAccessToken()) {
+          const user = await getCurrentUser();
+          if (mounted) setCurrentUser(user);
+        }
+      } catch {
+        setAccessToken(null);
+      } finally {
+        if (mounted) setAuthReady(true);
+      }
+    })();
+    return () => { mounted = false; window.removeEventListener('p2p-wms-session-expired', onSessionExpired); };
   }, []);
+
+  useEffect(() => {
+    if (authReady && currentUser) loadData();
+  }, [authReady, currentUser]);
+
+  useEffect(() => {
+    if (currentUser?.role === 'admin' && activeTab === 'users') {
+      setUsersLoading(true);
+      fetchUsers().then(setUsersList).catch(err => showNotification(err.response?.data?.error || 'Không tải được danh sách tài khoản.', 'error')).finally(() => setUsersLoading(false));
+    }
+  }, [currentUser, activeTab]);
 
   const [activePhotoModal, setActivePhotoModal] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -445,6 +485,66 @@ const handleExportCSV = () => {
     return Object.keys(map).map(cond => ({ name: cond, quantity: map[cond] }));
   }, [inventory]);
 
+  const roleLabels = { admin: 'Admin', manager: 'Quản lý', warehouse: 'Thủ kho', production: 'Production' };
+  const canManageInbound = ['admin', 'manager', 'warehouse'].includes(currentUser?.role);
+  const canManageOutbound = ['admin', 'manager', 'warehouse'].includes(currentUser?.role);
+  const isAdmin = currentUser?.role === 'admin';
+
+  const handleLogin = async (event) => {
+    event.preventDefault();
+    setLoginError('');
+    setLoginLoading(true);
+    try {
+      const result = await login({ email: loginForm.email.trim(), password: loginForm.password });
+      setCurrentUser(result.user);
+      setLoginForm({ email: '', password: '' });
+      setActiveTab('overview');
+      showNotification(`Xin chào ${result.user.fullName}!`, 'success');
+    } catch (err) {
+      setLoginError(err.response?.data?.error || 'Không thể đăng nhập. Kiểm tra kết nối và thử lại.');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+    } catch (err) {
+      setAccessToken(null);
+    } finally {
+      setCurrentUser(null);
+      setActiveTab('overview');
+      setInventory([]);
+      setLogs([]);
+      setLoginError('');
+      showNotification('Đã đăng xuất khỏi P2P WMS.', 'success');
+    }
+  };
+
+  const handleCreateUser = async (event) => {
+    event.preventDefault();
+    setUserFormError('');
+    try {
+      await createUser(userForm);
+      setUserForm({ fullName: '', email: '', password: '', role: 'production' });
+      setUsersList(await fetchUsers());
+      showNotification('Đã tạo tài khoản nhân viên.', 'success');
+    } catch (err) {
+      setUserFormError(err.response?.data?.error || 'Không thể tạo tài khoản.');
+    }
+  };
+
+  const handleToggleUser = async (user) => {
+    try {
+      await updateUser(user._id || user.id, { active: !user.active });
+      setUsersList(await fetchUsers());
+      showNotification(user.active ? 'Đã khóa tài khoản.' : 'Đã mở khóa tài khoản.', 'success');
+    } catch (err) {
+      showNotification(err.response?.data?.error || 'Không thể cập nhật tài khoản.', 'error');
+    }
+  };
+
   const filteredInventory = useMemo(() => {
     return inventory.filter(item => {
       const query = searchTerm.toLowerCase();
@@ -456,6 +556,39 @@ const handleExportCSV = () => {
       return matchSearch && matchDept && matchCondition;
     });
   }, [inventory, searchTerm, filterDepartment, filterCondition]);
+
+  if (!authReady) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-950 p-5 text-white">
+        <div className="text-center"><div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-600"><Box className="h-7 w-7" /></div><p className="text-sm text-slate-300">Đang kiểm tra phiên đăng nhập P2P WMS...</p></div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 px-4 py-10 flex items-center justify-center">
+        <div className="w-full max-w-md">
+          <div className="mb-7 text-center">
+            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-indigo-600 text-white shadow-xl shadow-indigo-950/50"><Box className="h-8 w-8" /></div>
+            <h1 className="text-2xl font-black tracking-wide text-white">P2P WMS</h1>
+            <p className="mt-2 text-sm text-slate-400">Đăng nhập hệ thống quản lý kho nội bộ</p>
+          </div>
+          <form onSubmit={handleLogin} className="rounded-3xl border border-slate-800 bg-slate-900 p-6 sm:p-8 shadow-2xl">
+            <div className="mb-6 flex items-center gap-3"><div className="rounded-xl bg-indigo-500/10 p-3 text-indigo-300"><LockKeyhole className="h-5 w-5" /></div><div><h2 className="font-bold text-white">Đăng nhập</h2><p className="text-xs text-slate-400">Sử dụng tài khoản do Admin cấp</p></div></div>
+            {loginError && <div role="alert" className="mb-4 rounded-xl border border-rose-800 bg-rose-950/60 px-3 py-2.5 text-sm text-rose-200">{loginError}</div>}
+            <label className="mb-1.5 block text-xs font-semibold text-slate-300" htmlFor="login-email">Email công ty</label>
+            <input id="login-email" type="email" autoComplete="username" required maxLength={254} value={loginForm.email} onChange={e => setLoginForm(prev => ({ ...prev, email: e.target.value }))} className="mb-4 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20" placeholder="ten@p2pmarketing.com.vn" />
+            <label className="mb-1.5 block text-xs font-semibold text-slate-300" htmlFor="login-password">Mật khẩu</label>
+            <input id="login-password" type="password" autoComplete="current-password" required maxLength={128} value={loginForm.password} onChange={e => setLoginForm(prev => ({ ...prev, password: e.target.value }))} className="mb-6 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20" placeholder="Nhập mật khẩu" />
+            <button type="submit" disabled={loginLoading} className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-bold text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60">{loginLoading ? <RefreshCw className="h-4 w-4 animate-spin" /> : <LockKeyhole className="h-4 w-4" />}{loginLoading ? 'Đang xác thực...' : 'Đăng nhập hệ thống'}</button>
+            <p className="mt-5 text-center text-[11px] leading-relaxed text-slate-500">Chỉ nhân sự được cấp tài khoản mới được truy cập. Mọi thao tác nghiệp vụ được xác thực tại máy chủ.</p>
+          </form>
+          <p className="mt-5 text-center text-[11px] text-slate-600">P2P Logistics · Warehouse Management System</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`min-h-screen flex flex-col md:flex-row transition-colors duration-200 ${darkMode ? 'bg-slate-900 text-slate-100' : 'bg-[#f8fafc] text-slate-900'}`}>
@@ -503,7 +636,7 @@ const handleExportCSV = () => {
               <span>Tổng Quan Dashboard</span>
             </button>
 
-            <button
+            {canManageInbound && <button
               onClick={() => { setActiveTab('inbound'); setMobileMenuOpen(false); }}
               className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all ${
                 activeTab === 'inbound'
@@ -513,9 +646,9 @@ const handleExportCSV = () => {
             >
               <ArrowDownLeft className="w-4 h-4 text-emerald-400" />
               <span>Quy Trình Nhập Kho</span>
-            </button>
+            </button>}
 
-            <button
+            {canManageOutbound && <button
               onClick={() => { setActiveTab('outbound'); setMobileMenuOpen(false); }}
               className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all ${
                 activeTab === 'outbound'
@@ -525,7 +658,7 @@ const handleExportCSV = () => {
             >
               <ArrowUpRight className="w-4 h-4 text-amber-400" />
               <span>Quy Trình Xuất Kho</span>
-            </button>
+            </button>}
 
             <button
               onClick={() => { setActiveTab('inventory'); setMobileMenuOpen(false); }}
@@ -555,6 +688,14 @@ const handleExportCSV = () => {
               <History className="w-4 h-4" />
               <span>Nhật Ký Realtime</span>
             </button>
+
+            {isAdmin && <button
+              onClick={() => { setActiveTab('users'); setMobileMenuOpen(false); }}
+              className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all ${activeTab === 'users' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
+            >
+              <Users className="w-4 h-4" />
+              <span>Quản lý tài khoản</span>
+            </button>}
           </nav>
         </div>
 
@@ -583,13 +724,18 @@ const handleExportCSV = () => {
               {activeTab === 'outbound' && '📤 Quy Trình Xuất Kho Hàng Hóa P2P'}
               {activeTab === 'inventory' && '📦 Danh Mục Quản Lý Tồn Kho P2P'}
               {activeTab === 'logs' && '📋 Nhật Ký Giao Nhận P2P & Audit Trail'}
+              {activeTab === 'users' && '🛡️ Quản Lý Tài Khoản & Phân Quyền'}
             </h2>
             <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
               Đồng bộ dữ liệu nhập/xuất kho liên tục kết nối trực tiếp với MongoDB Atlas
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="hidden lg:flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 px-3 py-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"><ShieldCheck className="h-4 w-4" /></div>
+              <div><p className="text-xs font-bold">{currentUser.fullName}</p><p className="text-[10px] text-slate-500">{roleLabels[currentUser.role] || currentUser.role}</p></div>
+            </div>
             <button
               onClick={handleExportCSV}
               className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900 border border-indigo-200 dark:border-indigo-800 text-xs font-semibold rounded-xl transition shadow-2xs"
@@ -597,6 +743,7 @@ const handleExportCSV = () => {
               <Download className="w-4 h-4" />
               <span>Xuất Báo Cáo CSV/Excel</span>
             </button>
+            <button type="button" onClick={handleLogout} title="Đăng xuất" className="inline-flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"><LogOut className="h-4 w-4" /><span className="hidden sm:inline">Đăng xuất</span></button>
           </div>
         </header>
 
@@ -758,22 +905,22 @@ const handleExportCSV = () => {
                     <PackageCheck className="w-5 h-5 text-indigo-500" />
                     Tạo Đơn Giao Dịch Kho P2P
                   </h3>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
+                  <div className={`grid gap-3 ${canManageInbound && canManageOutbound ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                    {canManageInbound && <button
                       onClick={() => setActiveTab('inbound')}
                       className="flex flex-col items-center justify-center p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 border border-emerald-200 dark:border-emerald-800 transition"
                     >
                       <ArrowDownLeft className="w-6 h-6 mb-1 text-emerald-600" />
                       <span className="font-bold text-xs text-center">Tạo Đơn Nhập</span>
-                    </button>
+                    </button>}
 
-                    <button
+                    {canManageOutbound && <button
                       onClick={() => setActiveTab('outbound')}
                       className="flex flex-col items-center justify-center p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50 border border-amber-200 dark:border-amber-800 transition"
                     >
                       <ArrowUpRight className="w-6 h-6 mb-1 text-amber-600" />
                       <span className="font-bold text-xs text-center">Tạo Đơn Xuất</span>
-                    </button>
+                    </button>}
                   </div>
                 </div>
 
@@ -1380,7 +1527,7 @@ const handleExportCSV = () => {
                             </td>
                             <td className="p-3.5 text-slate-500">{item.keeper}</td>
                             <td className="p-3.5 text-center">
-                              <button
+                              {canManageOutbound && <button
                                 onClick={() => {
                                   setOutboundForm(prev => ({ ...prev, selectedSku: item.sku }));
                                   setActiveTab('outbound');
@@ -1388,7 +1535,8 @@ const handleExportCSV = () => {
                                 className="px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-semibold rounded-lg hover:bg-indigo-100 text-[11px]"
                               >
                                 Xuất hàng
-                              </button>
+                              </button>}
+                              {!canManageOutbound && <span className="text-[10px] text-slate-400">Chỉ xem</span>}
                             </td>
                           </tr>
                         );
@@ -1461,6 +1609,41 @@ const handleExportCSV = () => {
                   </div>
                 ))}
               </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'users' && isAdmin && (
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+            <form onSubmit={handleCreateUser} className={`h-fit rounded-2xl border p-5 sm:p-6 ${darkMode ? 'border-slate-700 bg-slate-800/60' : 'border-slate-200 bg-white'} shadow-sm`}>
+              <h3 className="mb-1 flex items-center gap-2 text-base font-bold"><UserPlus className="h-5 w-5 text-indigo-500" /> Tạo tài khoản nhân viên</h3>
+              <p className="mb-5 text-xs text-slate-500">Mật khẩu tối thiểu 12 ký tự. Tài khoản mới không được tự đăng ký.</p>
+              {userFormError && <div role="alert" className="mb-4 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">{userFormError}</div>}
+              <label className="mb-1 block text-xs font-semibold">Họ và tên</label>
+              <input required minLength={2} maxLength={120} value={userForm.fullName} onChange={e => setUserForm(prev => ({ ...prev, fullName: e.target.value }))} className={`mb-4 w-full rounded-xl border px-3 py-2.5 text-sm outline-none focus:border-indigo-500 ${darkMode ? 'border-slate-700 bg-slate-900' : 'border-slate-300 bg-slate-50'}`} placeholder="Nguyễn Văn A" />
+              <label className="mb-1 block text-xs font-semibold">Email</label>
+              <input required type="email" maxLength={254} autoComplete="off" value={userForm.email} onChange={e => setUserForm(prev => ({ ...prev, email: e.target.value }))} className={`mb-4 w-full rounded-xl border px-3 py-2.5 text-sm outline-none focus:border-indigo-500 ${darkMode ? 'border-slate-700 bg-slate-900' : 'border-slate-300 bg-slate-50'}`} placeholder="nhanvien@p2pmarketing.com.vn" />
+              <label className="mb-1 block text-xs font-semibold">Mật khẩu tạm thời</label>
+              <input required type="password" minLength={12} maxLength={128} autoComplete="new-password" value={userForm.password} onChange={e => setUserForm(prev => ({ ...prev, password: e.target.value }))} className={`mb-4 w-full rounded-xl border px-3 py-2.5 text-sm outline-none focus:border-indigo-500 ${darkMode ? 'border-slate-700 bg-slate-900' : 'border-slate-300 bg-slate-50'}`} placeholder="Tối thiểu 12 ký tự" />
+              <label className="mb-1 block text-xs font-semibold">Vai trò</label>
+              <select value={userForm.role} onChange={e => setUserForm(prev => ({ ...prev, role: e.target.value }))} className={`mb-5 w-full rounded-xl border px-3 py-2.5 text-sm outline-none focus:border-indigo-500 ${darkMode ? 'border-slate-700 bg-slate-900' : 'border-slate-300 bg-slate-50'}`}>
+                <option value="production">Production — xem kho</option>
+                <option value="warehouse">Thủ kho — nhập/xuất kho</option>
+                <option value="manager">Quản lý — nhập/xuất, sửa phiếu</option>
+              </select>
+              <button type="submit" className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-bold text-white hover:bg-indigo-500"><UserPlus className="h-4 w-4" /> Tạo tài khoản</button>
+            </form>
+
+            <div className={`rounded-2xl border p-5 sm:p-6 ${darkMode ? 'border-slate-700 bg-slate-800/60' : 'border-slate-200 bg-white'} shadow-sm`}>
+              <div className="mb-4 flex items-center justify-between gap-3"><div><h3 className="font-bold">Tài khoản hệ thống</h3><p className="mt-1 text-xs text-slate-500">Khóa tài khoản sẽ vô hiệu hóa token đang hoạt động.</p></div><span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">{usersList.length} tài khoản</span></div>
+              {usersLoading ? <p className="py-10 text-center text-sm text-slate-500">Đang tải danh sách...</p> : usersList.length === 0 ? <p className="py-10 text-center text-sm text-slate-500">Chưa có tài khoản nào.</p> : (
+                <div className="space-y-3">
+                  {usersList.map(user => <div key={user._id || user.id} className={`flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center sm:justify-between ${darkMode ? 'border-slate-700 bg-slate-900/50' : 'border-slate-200 bg-slate-50'}`}>
+                    <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-bold">{user.fullName}</p><span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${user.active ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{user.active ? 'Hoạt động' : 'Đã khóa'}</span></div><p className="mt-1 break-all text-xs text-slate-500">{user.email}</p><p className="mt-1 text-[11px] text-indigo-500">{roleLabels[user.role] || user.role}</p></div>
+                    <div className="flex shrink-0 items-center gap-2"><select aria-label={`Vai trò của ${user.fullName}`} disabled={String(user._id || user.id) === String(currentUser.id)} value={user.role} onChange={async e => { try { await updateUser(user._id || user.id, { role: e.target.value }); setUsersList(await fetchUsers()); showNotification('Đã cập nhật vai trò.', 'success'); } catch (err) { showNotification(err.response?.data?.error || 'Không thể cập nhật vai trò.', 'error'); } }} className={`rounded-lg border px-2 py-2 text-xs ${darkMode ? 'border-slate-700 bg-slate-800' : 'border-slate-300 bg-white'}`}><option value="admin">Admin</option><option value="manager">Quản lý</option><option value="warehouse">Thủ kho</option><option value="production">Production</option></select><button type="button" disabled={String(user._id || user.id) === String(currentUser.id)} onClick={() => handleToggleUser(user)} className={`rounded-lg px-3 py-2 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-40 ${user.active ? 'bg-rose-100 text-rose-700 hover:bg-rose-200' : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'}`}>{user.active ? 'Khóa' : 'Mở khóa'}</button></div>
+                  </div>)}
+                </div>
+              )}
             </div>
           </div>
         )}
