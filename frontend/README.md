@@ -14,3 +14,12 @@ The React Compiler is not enabled on this template because of its impact on dev 
 ## Expanding the Oxlint configuration
 
 If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+
+
+## WMS upgrades in this package
+- Dashboard alerts for low-stock SKUs, assigned assets, and equipment needing inspection/maintenance.
+- Stocktake & reconciliation records at `/api/stocktakes`; records discrepancies without automatically changing stock balances.
+- Outbound handover requires a named recipient and an explicit confirmation checkbox; backend stores confirmation timestamp and audit history.
+- Asset return records the handover-back person, warehouse receiver, condition, note, timestamp, and optional photo URL in the asset history.
+
+Backend deployment is required for these additions. Configure `MONGO_URI`, `AUTH_TOKEN_SECRET` (at least 32 bytes), and `FRONTEND_URLS` in the deployment environment; do not commit `.env`.
