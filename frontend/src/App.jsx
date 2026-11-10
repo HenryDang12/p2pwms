@@ -317,79 +317,48 @@ export default function App() {
     await startCamera(cameraTarget, nextFacingMode);
   };
 
-const capturePhoto = async () => {
+  const capturePhoto = () => {
     const video = videoRef.current;
     if (!video || !video.srcObject || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
       showNotification('Camera chưa sẵn sàng. Vui lòng đợi hình ảnh xuất hiện rồi chụp lại.', 'error');
       return;
     }
 
-    const totalShots = 5;
-    const intervalMs = 400; // Khoảng thời gian giữa các lần chụp (miligiây)
-    const capturedPhotos = [];
-
-    showNotification(`Đang tiến hành chụp ${totalShots} tấm liên tiếp, vui lòng giữ nguyên máy...`, 'success');
-
-    for (let i = 0; i < totalShots; i++) {
-      // Kiểm tra lại nếu camera bị tắt giữa chừng
-      if (!videoRef.current || !videoRef.current.srcObject) break;
-
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const context = canvas.getContext('2d');
-      
-      if (!context) continue;
-
-      // Camera trước được lật gương để ảnh chụp khớp với phần xem trước.
-      if (cameraFacingMode === 'user') {
-        context.translate(canvas.width, 0);
-        context.scale(-1, 1);
-      }
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const photoDataUrl = canvas.toDataURL('image/jpeg', 0.9);
-      
-      capturedPhotos.push(photoDataUrl);
-
-      // Nếu chưa phải là tấm cuối cùng thì chờ một chút rồi chụp tiếp
-      if (i < totalShots - 1) {
-        await new Promise(resolve => setTimeout(resolve, intervalMs));
-      }
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext('2d');
+    if (!context) {
+      showNotification('Không xử lý được ảnh. Bạn có thể tải ảnh từ thiết bị lên thay thế.', 'error');
+      return;
     }
 
-    if (capturedPhotos.length > 0) {
-      if (cameraTarget === 'inbound') {
-        // Lưu ý: Đổi thuộc tính thành mảng photos hoặc giữ nguyên tùy cấu trúc form của bạn (ở đây lưu thành mảng)
-        setInboundForm(prev => ({ ...prev, photos: capturedPhotos }));
-      } else if (cameraTarget === 'outbound') {
-        setOutboundForm(prev => ({ ...prev, photos: capturedPhotos }));
-      }
-      stopCamera();
-      showNotification(`Đã chụp và đính kèm thành công ${capturedPhotos.length} ảnh.`);
-    } else {
-      showNotification('Không thể chụp được ảnh, vui lòng thử lại.', 'error');
+    // Camera trước được lật gương để ảnh chụp khớp với phần xem trước.
+    if (cameraFacingMode === 'user') {
+      context.translate(canvas.width, 0);
+      context.scale(-1, 1);
     }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const photoDataUrl = canvas.toDataURL('image/jpeg', 0.9);
+
+    if (cameraTarget === 'inbound') {
+      setInboundForm(prev => ({ ...prev, photo: photoDataUrl }));
+    } else if (cameraTarget === 'outbound') {
+      setOutboundForm(prev => ({ ...prev, photo: photoDataUrl }));
+    }
+    stopCamera();
+    showNotification('Đã chụp và đính kèm ảnh thành công.');
   };
 
-const handleFileUpload = (e, target) => {
-    const files = Array.from(e.target.files).slice(0, 5); // Lấy tối đa 5 file
-    if (files.length > 0) {
-      const readers = files.map(file => {
-        return new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result);
-          reader.readAsDataURL(file);
-        });
-      });
-
-      Promise.all(readers).then(results => {
-        if (target === 'inbound') {
-          setInboundForm(prev => ({ ...prev, photos: results }));
-        } else {
-          setOutboundForm(prev => ({ ...prev, photos: results }));
-        }
-        showNotification(`Đã tải lên thành công ${results.length} ảnh.`);
-      });
+  const handleFileUpload = (e, target) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        if (target === 'inbound') setInboundForm(prev => ({ ...prev, photo: reader.result }));
+        else setOutboundForm(prev => ({ ...prev, photo: reader.result }));
+      };
+      reader.readAsDataURL(file);
     }
   };
 
