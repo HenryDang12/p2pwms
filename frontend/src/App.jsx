@@ -135,7 +135,7 @@ export default function App() {
   };
 
   const authFetch = async (path, options = {}) => {
-    const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+    const baseUrl = import.meta.env.VITE_API_URL || 'https://p2pwms-1.onrender.com';
     const token = getAccessToken();
     const res = await fetch(`${baseUrl}${path}`, {
       ...options,
