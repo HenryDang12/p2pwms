@@ -5,7 +5,7 @@ import {
   AlertTriangle, Clock, RefreshCw, Filter, User, Building2, Briefcase, 
   Calendar, ShieldAlert, Tag, Image as ImageIcon, MapPin, X, Sun, Moon,
   TrendingUp, PackageCheck, AlertCircle, FileText, PieChart as PieIcon,
-  TrendingDown, RotateCcw, Check, Sparkles, Menu, LogOut, LockKeyhole, Users, UserPlus, ShieldCheck
+  TrendingDown, RotateCcw, Check, Sparkles, Menu, LogOut, LockKeyhole, Users, UserPlus, ShieldCheck, Bell
 } from 'lucide-react';
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -14,6 +14,19 @@ import {
 import { fetchTickets, createInboundTicket, submitOutboundTicket, updateTicket, deleteTicket, login, getCurrentUser, logout, getAccessToken, setAccessToken, fetchUsers, createUser, updateUser, fetchJobs, createJob, fetchAssets, createAsset, returnAsset, fetchStocktakes, createStocktake } from './api';
 
 const COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4'];
+
+const ROLE_LABELS = {
+  admin: 'Admin',
+  cs: 'CS',
+  fop: 'FOP',
+  warehouse_keeper: 'Người trực kho'
+};
+
+const ACTION_LABELS = {
+  import: 'Nhập hàng',
+  export: 'Xuất hàng',
+  pick: 'Lấy hàng'
+};
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('overview');
@@ -27,8 +40,26 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
   const [usersList, setUsersList] = useState([]);
   const [usersLoading, setUsersLoading] = useState(false);
-  const [userForm, setUserForm] = useState({ fullName: '', email: '', password: '', role: 'production' });
+  const [userForm, setUserForm] = useState({ fullName: '', email: '', password: '', role: 'warehouse_keeper' });
   const [userFormError, setUserFormError] = useState('');
+
+  // Bãi kho, phân quyền & thông báo
+  const [warehouses, setWarehouses] = useState([]);
+  const [warehouseStaff, setWarehouseStaff] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [unreadNotifCount, setUnreadNotifCount] = useState(0);
+  const [newWarehouseForm, setNewWarehouseForm] = useState({
+    name: '',
+    code: '',
+    providerName: '',
+    address: '',
+    contractNote: ''
+  });
+  const [permForm, setPermForm] = useState({
+    warehouseId: '',
+    targetUserId: '',
+    actions: []
+  });
 
   const [inventory, setInventory] = useState([]);
   const [logs, setLogs] = useState([]);
@@ -47,11 +78,106 @@ export default function App() {
   const [assetForm, setAssetForm] = useState({ assetCode: '', name: '', sku: '', serialNumber: '', category: 'Thiết bị', location: 'Kho P2P' });
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
 
+  const [activePhotoModal, setActivePhotoModal] = useState(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterDepartment, setFilterDepartment] = useState('ALL');
+  const [filterCondition, setFilterCondition] = useState('ALL');
+
+  const [inboundForm, setInboundForm] = useState({
+    orderCode: 'IN-' + Math.floor(10000 + Math.random() * 90000),
+    warehouseId: '',
+    sku: '',
+    name: '',
+    category: 'Vật tư Marketing',
+    quantity: 1,
+    unit: 'Cái',
+    minStock: 5,
+    condition: 'Mới 100%',
+    supplier: '',
+    project: 'Sự kiện Ra mắt Sản phẩm Mới',
+    jobId: '',
+    department: 'Marketing',
+    keeper: 'Kiên Đặng',
+    zone: 'Khu A - Kệ A1',
+    storageDays: 60,
+    note: '',
+    photo: null
+  });
+
+  const [outboundForm, setOutboundForm] = useState({
+    orderCode: 'OUT-' + Math.floor(10000 + Math.random() * 90000),
+    warehouseId: '',
+    actionMode: 'export', // 'export' | 'pick'
+    selectedSku: '',
+    quantity: 1,
+    condition: 'Tốt / Đã đóng gói',
+    receiver: '',
+    project: 'Sự kiện Ra mắt Sản phẩm Mới',
+    jobId: '',
+    department: 'Marketing',
+    approver: 'Trần Văn Quản Lý',
+    executor: 'Kiên Đặng',
+    note: '',
+    photo: null
+  });
+
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [cameraTarget, setCameraTarget] = useState(null);
+  const [cameraFacingMode, setCameraFacingMode] = useState('environment');
+  const [cameraStream, setCameraStream] = useState(null);
+  const [notification, setNotification] = useState(null);
+  const videoRef = useRef(null);
+
+  const showNotification = (message, type = 'success') => {
+    setNotification({ message: String(message), type });
+    window.clearTimeout(showNotification.timer);
+    showNotification.timer = window.setTimeout(() => setNotification(null), 4200);
+  };
+
+  const authFetch = async (path, options = {}) => {
+    const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+    const token = getAccessToken();
+    const res = await fetch(`${baseUrl}${path}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.headers || {})
+      }
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Lỗi máy chủ.');
+    return data;
+  };
+
+  const loadWarehouseAndNotifications = async (userObj = currentUser) => {
+    if (!userObj) return;
+    try {
+      const [whData, notifData] = await Promise.all([
+        authFetch('/api/warehouses'),
+        authFetch('/api/notifications')
+      ]);
+      setWarehouses(Array.isArray(whData) ? whData : []);
+      setNotifications(Array.isArray(notifData?.notifications) ? notifData.notifications : []);
+      setUnreadNotifCount(Number(notifData?.unreadCount || 0));
+
+      if (['admin', 'cs'].includes(userObj.role)) {
+        const staffData = await authFetch('/api/warehouse-staff');
+        setWarehouseStaff(Array.isArray(staffData) ? staffData : []);
+      }
+    } catch (err) {
+      console.error('Lỗi tải bãi kho/thông báo:', err.message);
+    }
+  };
+
   // Hàm load dữ liệu thật từ MongoDB Atlas qua Backend Cổng 5000
-  const loadData = async () => {
+  const loadData = async (userObj = currentUser) => {
     try {
       setLoading(true);
-      const data = await fetchTickets();
+      const [data] = await Promise.all([
+        fetchTickets(),
+        loadWarehouseAndNotifications(userObj)
+      ]);
       
       const invList = [];
       const logList = [];
@@ -62,6 +188,7 @@ export default function App() {
 
         invList.push({
           id: t._id,
+          warehouseId: t.warehouseId || null,
           sku: t.sku || t.inbound?.sku || 'N/A',
           name: t.itemName,
           category: 'Vật tư Marketing',
@@ -83,6 +210,7 @@ export default function App() {
             id: t._id + '-in',
             type: 'INBOUND',
             orderCode: t.ticketCode,
+            warehouseId: t.warehouseId || null,
             sku: t.sku || t.inbound.sku,
             itemName: t.itemName,
             quantity: t.inbound.quantity,
@@ -107,6 +235,7 @@ export default function App() {
               id: t._id + '-out-' + idx,
               type: 'OUTBOUND',
               orderCode: t.ticketCode + `-EX${idx+1}`,
+              warehouseId: t.warehouseId || null,
               sku: t.sku,
               itemName: t.itemName,
               quantity: ex.quantity,
@@ -116,6 +245,7 @@ export default function App() {
               project: t.inbound?.project,
               department: ex.receiverDepartment,
               executor: ex.executor,
+              actionMode: ex.actionMode || 'export',
               timestamp: new Date(ex.timestamp).toLocaleString(),
               dateStr: new Date(ex.timestamp).toLocaleDateString(),
               dateKey: ex.timestamp ? new Date(ex.timestamp).toISOString().slice(0, 10) : '',
@@ -160,7 +290,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (authReady && currentUser) loadData();
+    if (authReady && currentUser) loadData(currentUser);
   }, [authReady, currentUser]);
 
   useEffect(() => {
@@ -171,10 +301,147 @@ export default function App() {
   }, [currentUser, activeTab]);
 
   useEffect(() => {
-    if (!currentUser || !['jobs', 'outbound', 'overview', 'stocktake', 'returns'].includes(activeTab)) return;
+    if (!currentUser || !['jobs', 'outbound', 'overview', 'stocktake', 'returns', 'warehouses'].includes(activeTab)) return;
     Promise.all([fetchJobs(), fetchAssets()]).then(([jobData, assetData]) => { setJobs(jobData); setAssets(assetData); }).catch(err => showNotification(err.response?.data?.error || 'Không tải được Job/thiết bị.', 'error'));
     if (activeTab === 'stocktake') fetchStocktakes().then(setStocktakes).catch(err => showNotification(err.response?.data?.error || 'Không tải được lịch sử kiểm kê.', 'error')); 
+    if (activeTab === 'warehouses') loadWarehouseAndNotifications(currentUser);
   }, [currentUser, activeTab]);
+
+  const approvedWarehouses = useMemo(
+    () => warehouses.filter(w => w.approvalStatus === 'approved'),
+    [warehouses]
+  );
+
+  const canDoWarehouseAction = (warehouseId, action) => {
+    if (!currentUser) return false;
+    if (currentUser.role === 'admin') return true;
+    const targetWh = warehouses.find(w => String(w._id) === String(warehouseId));
+    if (!targetWh || targetWh.approvalStatus !== 'approved') return false;
+    if (currentUser.role === 'cs' && String(targetWh.createdBy?._id || targetWh.createdBy) === String(currentUser.id)) {
+      return true;
+    }
+    const perms = Array.isArray(currentUser.warehousePermissions) ? currentUser.warehousePermissions : [];
+    const entry = perms.find(p => String(p.warehouseId?._id || p.warehouseId) === String(warehouseId));
+    return Boolean(entry && Array.isArray(entry.actions) && entry.actions.includes(action));
+  };
+
+  const allowedInboundWarehouses = useMemo(() => {
+    if (!currentUser) return [];
+    if (currentUser.role === 'admin') return approvedWarehouses;
+    return approvedWarehouses.filter(w => canDoWarehouseAction(w._id, 'import'));
+  }, [currentUser, approvedWarehouses, warehouses]);
+
+  const allowedOutboundWarehouses = useMemo(() => {
+    if (!currentUser) return [];
+    if (currentUser.role === 'admin') return approvedWarehouses;
+    const mode = outboundForm.actionMode === 'pick' ? 'pick' : 'export';
+    return approvedWarehouses.filter(w => canDoWarehouseAction(w._id, mode));
+  }, [currentUser, approvedWarehouses, warehouses, outboundForm.actionMode]);
+
+  const canManageInbound = useMemo(() => {
+    if (!currentUser) return false;
+    if (currentUser.role === 'admin') return true;
+    return allowedInboundWarehouses.length > 0;
+  }, [currentUser, allowedInboundWarehouses]);
+
+  const canManageOutbound = useMemo(() => {
+    if (!currentUser) return false;
+    if (currentUser.role === 'admin') return true;
+    return approvedWarehouses.some(
+      w => canDoWarehouseAction(w._id, 'export') || canDoWarehouseAction(w._id, 'pick')
+    );
+  }, [currentUser, approvedWarehouses, warehouses]);
+
+  const isAdmin = currentUser?.role === 'admin';
+  const canManageWarehouses = ['admin', 'cs'].includes(currentUser?.role);
+
+  const handleRegisterWarehouse = async (e) => {
+    e.preventDefault();
+    try {
+      setLoading(true);
+      await authFetch('/api/warehouses', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: newWarehouseForm.name,
+          code: newWarehouseForm.code,
+          rentalInfo: {
+            providerName: newWarehouseForm.providerName,
+            address: newWarehouseForm.address,
+            contractNote: newWarehouseForm.contractNote
+          }
+        })
+      });
+      setNewWarehouseForm({ name: '', code: '', providerName: '', address: '', contractNote: '' });
+      showNotification('Đã tạo bãi kho và gửi yêu cầu lên Admin duyệt.', 'success');
+      await loadWarehouseAndNotifications(currentUser);
+    } catch (err) {
+      showNotification(err.message || 'Không tạo được bãi kho.', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleReviewWarehouse = async (warehouseId, approvalStatus) => {
+    let rejectReason = '';
+    if (approvalStatus === 'rejected') {
+      rejectReason = window.prompt('Nhập lý do từ chối bãi kho:') || '';
+    }
+    try {
+      setLoading(true);
+      await authFetch(`/api/warehouses/${warehouseId}/approval`, {
+        method: 'PATCH',
+        body: JSON.stringify({ approvalStatus, rejectReason })
+      });
+      showNotification(approvalStatus === 'approved' ? 'Đã duyệt bãi kho.' : 'Đã từ chối bãi kho.', 'success');
+      await loadWarehouseAndNotifications(currentUser);
+    } catch (err) {
+      showNotification(err.message || 'Lỗi duyệt bãi kho.', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const togglePermAction = (actionKey) => {
+    setPermForm(prev => ({
+      ...prev,
+      actions: prev.actions.includes(actionKey)
+        ? prev.actions.filter(a => a !== actionKey)
+        : [...prev.actions, actionKey]
+    }));
+  };
+
+  const handleSaveWarehousePermission = async (e) => {
+    e.preventDefault();
+    if (!permForm.warehouseId || !permForm.targetUserId) {
+      showNotification('Vui lòng chọn bãi kho và tài khoản FOP / người trực kho.', 'error');
+      return;
+    }
+    try {
+      setLoading(true);
+      await authFetch(`/api/warehouses/${permForm.warehouseId}/permissions`, {
+        method: 'POST',
+        body: JSON.stringify({
+          targetUserId: permForm.targetUserId,
+          actions: permForm.actions
+        })
+      });
+      showNotification('Đã lưu phân quyền bãi kho.', 'success');
+      await loadWarehouseAndNotifications(currentUser);
+    } catch (err) {
+      showNotification(err.message || 'Lỗi cập nhật quyền.', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleMarkNotificationRead = async (notifId) => {
+    try {
+      await authFetch(`/api/notifications/${notifId}/read`, { method: 'PATCH' });
+      await loadWarehouseAndNotifications(currentUser);
+    } catch (err) {
+      showNotification(err.message || 'Lỗi đánh dấu đã đọc.', 'error');
+    }
+  };
 
   const handleCreateJob = async (e) => {
     e.preventDefault();
@@ -219,59 +486,6 @@ export default function App() {
     }
   };
 
-  const [activePhotoModal, setActivePhotoModal] = useState(null);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [filterDepartment, setFilterDepartment] = useState('ALL');
-  const [filterCondition, setFilterCondition] = useState('ALL');
-
-  const [inboundForm, setInboundForm] = useState({
-    orderCode: 'IN-' + Math.floor(10000 + Math.random() * 90000),
-    sku: '',
-    name: '',
-    category: 'Vật tư Marketing',
-    quantity: 1,
-    unit: 'Cái',
-    minStock: 5,
-    condition: 'Mới 100%',
-    supplier: '',
-    project: 'Sự kiện Ra mắt Sản phẩm Mới',
-    jobId: '',
-    department: 'Marketing',
-    keeper: 'Kiên Đặng',
-    zone: 'Khu A - Kệ A1',
-    storageDays: 60,
-    note: '',
-    photo: null
-  });
-
-  const [outboundForm, setOutboundForm] = useState({
-    orderCode: 'OUT-' + Math.floor(10000 + Math.random() * 90000),
-    selectedSku: '',
-    quantity: 1,
-    condition: 'Tốt / Đã đóng gói',
-    receiver: '',
-    project: 'Sự kiện Ra mắt Sản phẩm Mới',
-    jobId: '',
-    department: 'Marketing',
-    approver: 'Trần Văn Quản Lý',
-    executor: 'Kiên Đặng',
-    note: '',
-    photo: null
-  });
-
-  const [isCameraActive, setIsCameraActive] = useState(false);
-  const [cameraTarget, setCameraTarget] = useState(null);
-  const [cameraFacingMode, setCameraFacingMode] = useState('environment');
-  const [cameraStream, setCameraStream] = useState(null);
-  const [notification, setNotification] = useState(null);
-  const videoRef = useRef(null);
-
-  const showNotification = (message, type = 'success') => {
-    setNotification({ message: String(message), type });
-    window.clearTimeout(showNotification.timer);
-    showNotification.timer = window.setTimeout(() => setNotification(null), 4200);
-  };
-
   useEffect(() => {
     if (videoRef.current && cameraStream) {
       videoRef.current.srcObject = cameraStream;
@@ -280,7 +494,6 @@ export default function App() {
   }, [cameraStream, isCameraActive]);
 
   const startCamera = async (target, facingMode = cameraFacingMode) => {
-    // Dừng luồng cũ trước khi đổi camera để tránh camera bị chiếm dụng.
     if (cameraStream) cameraStream.getTracks().forEach(track => track.stop());
     setCameraTarget(target);
     setCameraFacingMode(facingMode);
@@ -333,7 +546,6 @@ export default function App() {
       return;
     }
 
-    // Camera trước được lật gương để ảnh chụp khớp với phần xem trước.
     if (cameraFacingMode === 'user') {
       context.translate(canvas.width, 0);
       context.scale(-1, 1);
@@ -371,7 +583,7 @@ export default function App() {
     setCameraTarget(null);
   };
 
-const getCurrentFormattedDate = () => {
+  const getCurrentFormattedDate = () => {
     const now = new Date();
     const pad = (n) => (n < 10 ? '0' + n : n);
     return {
@@ -393,6 +605,7 @@ const getCurrentFormattedDate = () => {
     try {
       setLoading(true);
       const payload = {
+        warehouseId: inboundForm.warehouseId || undefined,
         sku: inboundForm.sku.toUpperCase(),
         itemName: inboundForm.name,
         unit: inboundForm.unit,
@@ -409,15 +622,15 @@ const getCurrentFormattedDate = () => {
       };
 
       await createInboundTicket(payload);
-      // Clear form text after a successful add so old values are not reused accidentally.
       setInboundForm({
         orderCode: 'IN-' + Math.floor(10000 + Math.random() * 90000),
+        warehouseId: '',
         sku: '', name: '', category: 'Vật tư Marketing', quantity: 1, unit: 'Cái',
         minStock: 5, condition: 'Mới 100%', supplier: '', project: '', jobId: '',
         department: 'Marketing', keeper: '', zone: '', storageDays: 60, note: '', photo: null
       });
-      showNotification('Nhập kho thành công. Đã xóa nội dung biểu mẫu để nhập phiếu mới.', 'success');
-      loadData();
+      showNotification('Nhập kho thành công và đã gửi thông báo cho CS & Admin.', 'success');
+      await loadData(currentUser);
       setActiveTab('overview');
     } catch (err) {
       showNotification('Không thể lưu phiếu nhập: ' + (err.response?.data?.error || err.message), 'error');
@@ -435,7 +648,6 @@ const getCurrentFormattedDate = () => {
 
     try {
       setLoading(true);
-      // Lấy ticket gốc theo SKU để gửi đúng ID lên backend.
       const allRawTickets = await fetchTickets();
       const targetTicket = allRawTickets.find(t => (t.sku === outboundForm.selectedSku || t.inbound?.sku === outboundForm.selectedSku));
 
@@ -451,6 +663,8 @@ const getCurrentFormattedDate = () => {
       }
 
       const payload = {
+        warehouseId: outboundForm.warehouseId || targetTicket.warehouseId || undefined,
+        actionMode: outboundForm.actionMode || 'export',
         quantity: Number(outboundForm.quantity),
         sku: targetTicket.sku,
         jobId: outboundForm.jobId || undefined,
@@ -467,15 +681,16 @@ const getCurrentFormattedDate = () => {
       await submitOutboundTicket(targetTicket._id, payload);
       setSelectedAssetIds([]);
       setReceiverConfirmed(false);
-      // Clear form text after a successful add so the next outbound starts fresh.
       setOutboundForm({
         orderCode: 'OUT-' + Math.floor(10000 + Math.random() * 90000),
+        warehouseId: '',
+        actionMode: 'export',
         selectedSku: '', quantity: 1, condition: 'Tốt / Đã đóng gói', receiver: '',
         project: '', jobId: '', department: 'Marketing', approver: '', executor: '',
         note: '', photo: null
       });
-      showNotification('Xuất kho thành công. Tồn kho và Job/Event đã được cập nhật; biểu mẫu đã được xóa.', 'success');
-      loadData();
+      showNotification('Xuất/lấy hàng thành công và đã gửi thông báo cho CS & Admin.', 'success');
+      await loadData(currentUser);
       setActiveTab('overview');
     } catch (err) {
       showNotification('Không thể lưu phiếu xuất: ' + (err.response?.data?.error || err.message), 'error');
@@ -484,7 +699,7 @@ const getCurrentFormattedDate = () => {
     }
   };
 
-const handleCreateStocktake = async (e) => {
+  const handleCreateStocktake = async (e) => {
     e.preventDefault();
     const lines = stocktakeInventory.map(item => {
       const raw = stocktakeCounts[item.sku];
@@ -504,7 +719,6 @@ const handleCreateStocktake = async (e) => {
   };
 
   const handleExportCSV = () => {
-    // Biến csvContent được khai báo cục bộ CHÍNH XÁC BÊN TRONG HÀM NÀY
     let csvContent = "\uFEFFID,SKU,TenHang,DanhMuc,SoLuong,DonVi,TinhTrang,KhuVuc,DuAn,PhongBan,NgayNhap,LinkAnh\n";
     
     inventory.forEach(row => {
@@ -531,7 +745,6 @@ const handleCreateStocktake = async (e) => {
     URL.revokeObjectURL(url);
   };
   
-  
   const stocktakeInventory = useMemo(() => {
     const map = new Map();
     inventory.forEach(item => {
@@ -544,12 +757,10 @@ const handleCreateStocktake = async (e) => {
     return Array.from(map.values());
   }, [inventory]);
 
-  // Tổng số lượng hàng đang tồn kho (cộng số lượng của tất cả SKU).
   const totalItemsCount = useMemo(() => {
     return inventory.reduce((total, item) => total + (Number(item.quantity) || 0), 0);
   }, [inventory]);
 
-  // Đếm số SKU có tồn kho chạm/vượt xuống dưới định mức tối thiểu.
   const lowStockCount = useMemo(() => {
     return inventory.filter(item => {
       const quantity = Number(item.quantity) || 0;
@@ -601,10 +812,7 @@ const handleCreateStocktake = async (e) => {
     return Object.keys(map).map(cond => ({ name: cond, quantity: map[cond] }));
   }, [inventory]);
 
-  const roleLabels = { admin: 'Admin', manager: 'Quản lý', warehouse: 'Thủ kho', production: 'Production' };
-  const canManageInbound = ['admin', 'manager', 'warehouse'].includes(currentUser?.role);
-  const canManageOutbound = ['admin', 'manager', 'warehouse'].includes(currentUser?.role);
-  const isAdmin = currentUser?.role === 'admin';
+  const roleLabels = ROLE_LABELS;
 
   const handleLogin = async (event) => {
     event.preventDefault();
@@ -633,6 +841,8 @@ const handleCreateStocktake = async (e) => {
       setActiveTab('overview');
       setInventory([]);
       setLogs([]);
+      setWarehouses([]);
+      setNotifications([]);
       setLoginError('');
       showNotification('Đã đăng xuất khỏi P2P WMS.', 'success');
     }
@@ -643,7 +853,7 @@ const handleCreateStocktake = async (e) => {
     setUserFormError('');
     try {
       await createUser(userForm);
-      setUserForm({ fullName: '', email: '', password: '', role: 'production' });
+      setUserForm({ fullName: '', email: '', password: '', role: 'warehouse_keeper' });
       setUsersList(await fetchUsers());
       showNotification('Đã tạo tài khoản nhân viên.', 'success');
     } catch (err) {
@@ -752,6 +962,23 @@ const handleCreateStocktake = async (e) => {
               <span>Tổng Quan Dashboard</span>
             </button>
 
+            <button
+              onClick={() => { setActiveTab('warehouses'); setMobileMenuOpen(false); }}
+              className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all ${
+                activeTab === 'warehouses'
+                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                  : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+              }`}
+            >
+              <Bell className="w-4 h-4 text-sky-400" />
+              <span>Bãi kho & Thông báo</span>
+              {unreadNotifCount > 0 && (
+                <span className="ml-auto bg-amber-500 text-slate-950 font-bold text-[10px] px-2 py-0.5 rounded-full">
+                  {unreadNotifCount}
+                </span>
+              )}
+            </button>
+
             {canManageInbound && <button
               onClick={() => { setActiveTab('inbound'); setMobileMenuOpen(false); }}
               className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs font-semibold transition-all ${
@@ -773,7 +1000,7 @@ const handleCreateStocktake = async (e) => {
               }`}
             >
               <ArrowUpRight className="w-4 h-4 text-amber-400" />
-              <span>Quy Trình Xuất Kho</span>
+              <span>Quy Trình Xuất / Lấy Hàng</span>
             </button>}
 
             <button
@@ -849,8 +1076,9 @@ const handleCreateStocktake = async (e) => {
           <div>
             <h2 className={`text-lg sm:text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2 ${darkMode ? 'text-slate-100' : 'text-slate-900'}`}>
               {activeTab === 'overview' && '📊 Dashboard Quản Lý Kho P2P & Biểu Đồ Realtime'}
+              {activeTab === 'warehouses' && '🏭 Quản Lý Bãi Kho, Phân Quyền & Thông Báo'}
               {activeTab === 'inbound' && '📥 Quy Trình Nhập Kho Hàng Hóa P2P'}
-              {activeTab === 'outbound' && '📤 Quy Trình Xuất Kho Hàng Hóa P2P'}
+              {activeTab === 'outbound' && '📤 Quy Trình Xuất / Lấy Hàng Hóa P2P'}
               {activeTab === 'inventory' && '📦 Danh Mục Quản Lý Tồn Kho P2P'}
               {activeTab === 'logs' && '📋 Nhật Ký Giao Nhận P2P & Audit Trail'}
               {activeTab === 'jobs' && '🗓️ Quản Lý Job/Event & Thiết Bị Theo Mã Riêng'}
@@ -1065,7 +1293,7 @@ const handleCreateStocktake = async (e) => {
                       className="flex flex-col items-center justify-center p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50 border border-amber-200 dark:border-amber-800 transition"
                     >
                       <ArrowUpRight className="w-6 h-6 mb-1 text-amber-600" />
-                      <span className="font-bold text-xs text-center">Tạo Đơn Xuất</span>
+                      <span className="font-bold text-xs text-center">Tạo Đơn Xuất / Lấy</span>
                     </button>}
                   </div>
                 </div>
@@ -1106,7 +1334,7 @@ const handleCreateStocktake = async (e) => {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between">
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${log.type === 'INBOUND' ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'}`}>
-                            {log.type === 'INBOUND' ? 'NHẬP KHO' : 'XUẤT KHO'} • {log.orderCode}
+                            {log.type === 'INBOUND' ? 'NHẬP KHO' : (log.actionMode === 'pick' ? 'LẤY HÀNG' : 'XUẤT KHO')} • {log.orderCode}
                           </span>
                           <span className="text-[11px] text-slate-400 flex items-center gap-1">
                             <Clock className="w-3 h-3" />
@@ -1136,6 +1364,167 @@ const handleCreateStocktake = async (e) => {
           </div>
         )}
 
+        {/* TAB BÃI KHO, PHÂN QUYỀN & THÔNG BÁO */}
+        {activeTab === 'warehouses' && (
+          <div className="space-y-6">
+            {canManageWarehouses && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <form onSubmit={handleRegisterWarehouse} className={`p-5 rounded-2xl border space-y-3 ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'}`}>
+                  <h3 className="font-bold text-base">Đăng ký / Tạo bãi kho mới (gửi Admin duyệt)</h3>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Tên bãi kho (VD: Bãi kho Q9 - Lô B)"
+                    value={newWarehouseForm.name}
+                    onChange={e => setNewWarehouseForm(prev => ({ ...prev, name: e.target.value }))}
+                    className={`w-full rounded-xl border px-3.5 py-2.5 text-xs outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Mã bãi kho (tùy chọn)"
+                    value={newWarehouseForm.code}
+                    onChange={e => setNewWarehouseForm(prev => ({ ...prev, code: e.target.value }))}
+                    className={`w-full rounded-xl border px-3.5 py-2.5 text-xs outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Đơn vị cho thuê"
+                    value={newWarehouseForm.providerName}
+                    onChange={e => setNewWarehouseForm(prev => ({ ...prev, providerName: e.target.value }))}
+                    className={`w-full rounded-xl border px-3.5 py-2.5 text-xs outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
+                  />
+                  <input
+                    type="text"
+                    required
+                    placeholder="Địa chỉ bãi kho"
+                    value={newWarehouseForm.address}
+                    onChange={e => setNewWarehouseForm(prev => ({ ...prev, address: e.target.value }))}
+                    className={`w-full rounded-xl border px-3.5 py-2.5 text-xs outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Ghi chú hợp đồng / thời gian thuê"
+                    value={newWarehouseForm.contractNote}
+                    onChange={e => setNewWarehouseForm(prev => ({ ...prev, contractNote: e.target.value }))}
+                    className={`w-full rounded-xl border px-3.5 py-2.5 text-xs outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
+                  />
+                  <button type="submit" disabled={loading} className="w-full py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-500">
+                    Gửi yêu cầu duyệt bãi kho
+                  </button>
+                </form>
+
+                <form onSubmit={handleSaveWarehousePermission} className={`p-5 rounded-2xl border space-y-3 ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'}`}>
+                  <h3 className="font-bold text-base">CS cấp quyền cho FOP & Người trực kho</h3>
+                  <select
+                    value={permForm.warehouseId}
+                    onChange={e => setPermForm(prev => ({ ...prev, warehouseId: e.target.value }))}
+                    className={`w-full rounded-xl border px-3.5 py-2.5 text-xs outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
+                  >
+                    <option value="">-- Chọn bãi kho đã duyệt --</option>
+                    {approvedWarehouses.map(w => (
+                      <option key={w._id} value={w._id}>{w.name}</option>
+                    ))}
+                  </select>
+
+                  <select
+                    value={permForm.targetUserId}
+                    onChange={e => setPermForm(prev => ({ ...prev, targetUserId: e.target.value }))}
+                    className={`w-full rounded-xl border px-3.5 py-2.5 text-xs outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
+                  >
+                    <option value="">-- Chọn tài khoản FOP / Người trực kho --</option>
+                    {warehouseStaff.map(u => (
+                      <option key={u._id} value={u._id}>
+                        {u.fullName} ({ROLE_LABELS[u.role] || u.role})
+                      </option>
+                    ))}
+                  </select>
+
+                  <div className="flex flex-wrap gap-4 pt-1">
+                    {Object.entries(ACTION_LABELS).map(([key, label]) => (
+                      <label key={key} className="flex items-center gap-2 text-xs cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={permForm.actions.includes(key)}
+                          onChange={() => togglePermAction(key)}
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+
+                  <button type="submit" disabled={loading} className="w-full py-2.5 rounded-xl bg-slate-900 text-white text-xs font-bold hover:bg-slate-800">
+                    Lưu phân quyền bãi kho
+                  </button>
+                </form>
+              </div>
+            )}
+
+            <div className={`p-5 rounded-2xl border space-y-3 ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'}`}>
+              <h3 className="font-bold text-base">Danh sách bãi kho</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs border-collapse text-left">
+                  <thead>
+                    <tr className={`border-b ${darkMode ? 'bg-slate-900/80 border-slate-700 text-slate-400' : 'bg-slate-100 border-slate-200 text-slate-700'}`}>
+                      <th className="p-3">Tên bãi kho</th>
+                      <th className="p-3">Địa chỉ</th>
+                      <th className="p-3">CS đăng ký</th>
+                      <th className="p-3">Trạng thái</th>
+                      {isAdmin && <th className="p-3 text-right">Admin duyệt</th>}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200/20">
+                    {warehouses.map(w => (
+                      <tr key={w._id}>
+                        <td className="p-3 font-semibold">{w.name}</td>
+                        <td className="p-3">{w.rentalInfo?.address || '-'}</td>
+                        <td className="p-3">{w.createdBy?.fullName || '-'}</td>
+                        <td className="p-3">
+                          {w.approvalStatus === 'approved' ? 'Đã duyệt' : w.approvalStatus === 'rejected' ? 'Từ chối' : 'Chờ duyệt'}
+                        </td>
+                        {isAdmin && (
+                          <td className="p-3 text-right space-x-2">
+                            {w.approvalStatus === 'pending' && (
+                              <>
+                                <button type="button" onClick={() => handleReviewWarehouse(w._id, 'approved')} className="px-3 py-1 rounded-lg bg-emerald-600 text-white text-xs font-semibold">
+                                  Duyệt
+                                </button>
+                                <button type="button" onClick={() => handleReviewWarehouse(w._id, 'rejected')} className="px-3 py-1 rounded-lg bg-rose-600 text-white text-xs font-semibold">
+                                  Từ chối
+                                </button>
+                              </>
+                            )}
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className={`p-5 rounded-2xl border space-y-3 ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'}`}>
+              <h3 className="font-bold text-base">Thông báo xuất / nhập / lấy hàng & duyệt bãi</h3>
+              <div className="divide-y divide-slate-200/20 max-h-80 overflow-y-auto">
+                {notifications.map(n => (
+                  <div
+                    key={n._id}
+                    onClick={() => !n.isRead && handleMarkNotificationRead(n._id)}
+                    className={`p-3 flex items-start justify-between gap-3 cursor-pointer rounded-lg ${n.isRead ? '' : 'bg-amber-500/10'}`}
+                  >
+                    <div>
+                      <div className="font-semibold text-sm">{n.title}</div>
+                      <div className="text-xs text-slate-500">{n.message}</div>
+                      <div className="text-[11px] text-slate-400 mt-1">{new Date(n.createdAt).toLocaleString('vi-VN')}</div>
+                    </div>
+                    {!n.isRead && <span className="text-[11px] px-2 py-0.5 rounded bg-amber-400 text-slate-950 font-semibold">Mới</span>}
+                  </div>
+                ))}
+                {notifications.length === 0 && <div className="p-4 text-center text-xs text-slate-400">Chưa có thông báo.</div>}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* TAB 2: INBOUND FORM */}
         {activeTab === 'inbound' && (
           <div className={`p-5 sm:p-6 rounded-2xl border ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'} shadow-2xs max-w-4xl mx-auto`}>
@@ -1151,6 +1540,20 @@ const handleCreateStocktake = async (e) => {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div className="md:col-span-2">
+                  <label className={`block font-bold uppercase mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>Bãi Kho Nhập Hàng</label>
+                  <select
+                    value={inboundForm.warehouseId}
+                    onChange={e => setInboundForm({ ...inboundForm, warehouseId: e.target.value })}
+                    className={`w-full px-3.5 py-2.5 rounded-xl border focus:ring-2 focus:ring-indigo-500 outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
+                  >
+                    <option value="">-- Mặc định / Kho chính --</option>
+                    {allowedInboundWarehouses.map(w => (
+                      <option key={w._id} value={w._id}>{w.name}</option>
+                    ))}
+                  </select>
+                </div>
+
                 <div>
                   <label className={`block font-bold uppercase mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>Mã SKU / Mã Sản Phẩm *</label>
                   <input
@@ -1257,7 +1660,7 @@ const handleCreateStocktake = async (e) => {
                     onChange={e => setInboundForm({ ...inboundForm, department: e.target.value })}
                     className={`w-full px-3.5 py-2.5 rounded-xl border focus:ring-2 focus:ring-indigo-500 outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
                   >
-                    <option value="Marketing">Marketing CS</option>.
+                    <option value="Marketing">Marketing CS</option>
                     <option value="Fop">Operation</option>
                     <option value="Client Service">Client Service</option>
                     <option value="Mua hàng (Purchasing)">Mua hàng (Purchasing)</option>
@@ -1386,14 +1789,14 @@ const handleCreateStocktake = async (e) => {
           </div>
         )}
 
-        {/* TAB 3: OUTBOUND FORM */}
+        {/* TAB 3: OUTBOUND / PICK FORM */}
         {activeTab === 'outbound' && (
           <div className={`p-5 sm:p-6 rounded-2xl border ${darkMode ? 'bg-slate-800/60 border-slate-700' : 'bg-white border-slate-200'} shadow-2xs max-w-4xl mx-auto`}>
             <form onSubmit={handleOutboundSubmit} className="space-y-6">
               <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-700 pb-4">
                 <div className="flex items-center gap-2">
                   <ArrowUpRight className="w-6 h-6 text-amber-500" />
-                  <h3 className={`text-base sm:text-lg font-bold ${darkMode ? 'text-slate-100' : 'text-slate-900'}`}>Phiếu Xuất Kho Hàng Hóa P2P</h3>
+                  <h3 className={`text-base sm:text-lg font-bold ${darkMode ? 'text-slate-100' : 'text-slate-900'}`}>Phiếu Xuất / Lấy Hàng Hóa P2P</h3>
                 </div>
                 <span className={`text-xs font-mono px-3 py-1 rounded-md ${darkMode ? 'bg-slate-700 text-slate-200' : 'bg-slate-100 text-slate-800'}`}>
                   Mã phiếu: <b>{outboundForm.orderCode}</b>
@@ -1401,8 +1804,34 @@ const handleCreateStocktake = async (e) => {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div>
+                  <label className={`block font-bold uppercase mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>Hình Thức Thực Hiện</label>
+                  <select
+                    value={outboundForm.actionMode}
+                    onChange={e => setOutboundForm({ ...outboundForm, actionMode: e.target.value, warehouseId: '' })}
+                    className={`w-full px-3.5 py-2.5 rounded-xl border focus:ring-2 focus:ring-amber-500 outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
+                  >
+                    <option value="export">Xuất hàng</option>
+                    <option value="pick">Lấy hàng</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className={`block font-bold uppercase mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>Bãi Kho</label>
+                  <select
+                    value={outboundForm.warehouseId}
+                    onChange={e => setOutboundForm({ ...outboundForm, warehouseId: e.target.value })}
+                    className={`w-full px-3.5 py-2.5 rounded-xl border focus:ring-2 focus:ring-amber-500 outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
+                  >
+                    <option value="">-- Tự động theo mặt hàng / Kho chính --</option>
+                    {allowedOutboundWarehouses.map(w => (
+                      <option key={w._id} value={w._id}>{w.name}</option>
+                    ))}
+                  </select>
+                </div>
+
                 <div className="md:col-span-2">
-                  <label className={`block font-bold uppercase mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>Chọn Hàng Hóa Cần Xuất *</label>
+                  <label className={`block font-bold uppercase mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>Chọn Hàng Hóa Cần Xuất / Lấy *</label>
                   <select
                     required
                     value={outboundForm.selectedSku}
@@ -1428,7 +1857,7 @@ const handleCreateStocktake = async (e) => {
                 </div>
 
                 <div>
-                  <label className={`block font-bold uppercase mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>Số Lượng Xuất *</label>
+                  <label className={`block font-bold uppercase mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>Số Lượng Xuất / Lấy *</label>
                   <input
                     type="number"
                     min="1"
@@ -1487,10 +1916,10 @@ const handleCreateStocktake = async (e) => {
               </div>
 
               <div>
-                <label className={`block font-bold uppercase mb-1 text-xs ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>Ghi Chú Xuất Kho</label>
+                <label className={`block font-bold uppercase mb-1 text-xs ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>Ghi Chú Xuất / Lấy Hàng</label>
                 <textarea
                   rows="2"
-                  placeholder="Ghi chú lý do xuất..."
+                  placeholder="Ghi chú lý do xuất/lấy hàng..."
                   value={outboundForm.note}
                   onChange={e => setOutboundForm({ ...outboundForm, note: e.target.value })}
                   className={`w-full px-3.5 py-2.5 text-xs rounded-xl border focus:ring-2 focus:ring-amber-500 outline-none ${darkMode ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-slate-50 border-slate-300 text-slate-900'}`}
@@ -1582,7 +2011,7 @@ const handleCreateStocktake = async (e) => {
                   className="px-6 py-3 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl shadow-lg shadow-amber-600/30 text-xs sm:text-sm flex items-center gap-2 transition"
                 >
                   <CheckCircle2 className="w-5 h-5" />
-                  Xác Nhận Xuất Kho P2P
+                  {outboundForm.actionMode === 'pick' ? 'Xác Nhận Lấy Hàng P2P' : 'Xác Nhận Xuất Kho P2P'}
                 </button>
               </div>
             </form>
@@ -1705,7 +2134,7 @@ const handleCreateStocktake = async (e) => {
                                 }}
                                 className="px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-semibold rounded-lg hover:bg-indigo-100 text-[11px]"
                               >
-                                Xuất hàng
+                                Xuất / Lấy
                               </button>}
                               {!canManageOutbound && <span className="text-[10px] text-slate-400">Chỉ xem</span>}
                             </td>
@@ -1753,7 +2182,7 @@ const handleCreateStocktake = async (e) => {
                       <div className="space-y-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className={`text-xs font-extrabold px-2.5 py-0.5 rounded-full ${log.type === 'INBOUND' ? 'bg-emerald-500 text-white' : 'bg-amber-500 text-slate-950'}`}>
-                            {log.type === 'INBOUND' ? 'NHẬP KHO' : 'XUẤT KHO'}
+                            {log.type === 'INBOUND' ? 'NHẬP KHO' : (log.actionMode === 'pick' ? 'LẤY HÀNG' : 'XUẤT KHO')}
                           </span>
                           <span className="font-mono text-xs font-bold text-slate-500">{log.orderCode}</span>
                           <span className="text-xs text-slate-400 flex items-center gap-1">
@@ -1889,9 +2318,9 @@ const handleCreateStocktake = async (e) => {
               <input required type="password" minLength={12} maxLength={128} autoComplete="new-password" value={userForm.password} onChange={e => setUserForm(prev => ({ ...prev, password: e.target.value }))} className={`mb-4 w-full rounded-xl border px-3 py-2.5 text-sm outline-none focus:border-indigo-500 ${darkMode ? 'border-slate-700 bg-slate-900' : 'border-slate-300 bg-slate-50'}`} placeholder="Tối thiểu 12 ký tự" />
               <label className="mb-1 block text-xs font-semibold">Vai trò</label>
               <select value={userForm.role} onChange={e => setUserForm(prev => ({ ...prev, role: e.target.value }))} className={`mb-5 w-full rounded-xl border px-3 py-2.5 text-sm outline-none focus:border-indigo-500 ${darkMode ? 'border-slate-700 bg-slate-900' : 'border-slate-300 bg-slate-50'}`}>
-                <option value="production">Production — xem kho</option>
-                <option value="warehouse">Thủ kho — nhập/xuất kho</option>
-                <option value="manager">Quản lý — nhập/xuất, sửa phiếu</option>
+                <option value="cs">CS — quản lý bãi kho & phân quyền</option>
+                <option value="fop">FOP — thao tác bãi kho theo quyền</option>
+                <option value="warehouse_keeper">Người trực kho — thao tác bãi kho theo quyền</option>
               </select>
               <button type="submit" className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-bold text-white hover:bg-indigo-500"><UserPlus className="h-4 w-4" /> Tạo tài khoản</button>
             </form>
@@ -1902,7 +2331,7 @@ const handleCreateStocktake = async (e) => {
                 <div className="space-y-3">
                   {usersList.map(user => <div key={user._id || user.id} className={`flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center sm:justify-between ${darkMode ? 'border-slate-700 bg-slate-900/50' : 'border-slate-200 bg-slate-50'}`}>
                     <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-bold">{user.fullName}</p><span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${user.active ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{user.active ? 'Hoạt động' : 'Đã khóa'}</span></div><p className="mt-1 break-all text-xs text-slate-500">{user.email}</p><p className="mt-1 text-[11px] text-indigo-500">{roleLabels[user.role] || user.role}</p></div>
-                    <div className="flex shrink-0 items-center gap-2"><select aria-label={`Vai trò của ${user.fullName}`} disabled={String(user._id || user.id) === String(currentUser.id)} value={user.role} onChange={async e => { try { await updateUser(user._id || user.id, { role: e.target.value }); setUsersList(await fetchUsers()); showNotification('Đã cập nhật vai trò.', 'success'); } catch (err) { showNotification(err.response?.data?.error || 'Không thể cập nhật vai trò.', 'error'); } }} className={`rounded-lg border px-2 py-2 text-xs ${darkMode ? 'border-slate-700 bg-slate-800' : 'border-slate-300 bg-white'}`}><option value="admin">Admin</option><option value="manager">Quản lý</option><option value="warehouse">Thủ kho</option><option value="production">Production</option></select><button type="button" disabled={String(user._id || user.id) === String(currentUser.id)} onClick={() => handleToggleUser(user)} className={`rounded-lg px-3 py-2 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-40 ${user.active ? 'bg-rose-100 text-rose-700 hover:bg-rose-200' : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'}`}>{user.active ? 'Khóa' : 'Mở khóa'}</button></div>
+                    <div className="flex shrink-0 items-center gap-2"><select aria-label={`Vai trò của ${user.fullName}`} disabled={String(user._id || user.id) === String(currentUser.id)} value={user.role} onChange={async e => { try { await updateUser(user._id || user.id, { role: e.target.value }); setUsersList(await fetchUsers()); showNotification('Đã cập nhật vai trò.', 'success'); } catch (err) { showNotification(err.response?.data?.error || 'Không thể cập nhật vai trò.', 'error'); } }} className={`rounded-lg border px-2 py-2 text-xs ${darkMode ? 'border-slate-700 bg-slate-800' : 'border-slate-300 bg-white'}`}><option value="admin">Admin</option><option value="cs">CS</option><option value="fop">FOP</option><option value="warehouse_keeper">Người trực kho</option></select><button type="button" disabled={String(user._id || user.id) === String(currentUser.id)} onClick={() => handleToggleUser(user)} className={`rounded-lg px-3 py-2 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-40 ${user.active ? 'bg-rose-100 text-rose-700 hover:bg-rose-200' : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'}`}>{user.active ? 'Khóa' : 'Mở khóa'}</button></div>
                   </div>)}
                 </div>
               )}

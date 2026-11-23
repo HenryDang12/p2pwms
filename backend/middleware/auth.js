@@ -52,7 +52,8 @@ async function authenticate(req, res, next) {
     if (!match) return res.status(401).json({ error: 'Vui lòng đăng nhập để tiếp tục.' });
 
     const payload = verifyToken(match[1]);
-    const user = await User.findById(payload.sub).select('_id fullName email role active tokenVersion');
+    const user = await User.findById(payload.sub)
+      .select('_id fullName email role active tokenVersion warehousePermissions');
     if (!user || !user.active || user.tokenVersion !== payload.ver) {
       return res.status(401).json({ error: 'Phiên đăng nhập không còn hiệu lực. Vui lòng đăng nhập lại.' });
     }

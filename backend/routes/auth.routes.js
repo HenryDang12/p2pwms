@@ -42,7 +42,13 @@ function isValidEmail(email) {
 }
 
 function publicUser(user) {
-  return { id: String(user._id), fullName: user.fullName, email: user.email, role: user.role };
+  return {
+    id: String(user._id),
+    fullName: user.fullName,
+    email: user.email,
+    role: user.role,
+    warehousePermissions: Array.isArray(user.warehousePermissions) ? user.warehousePermissions : []
+  };
 }
 
 router.post('/setup-admin', async (req, res) => {
@@ -132,14 +138,17 @@ router.post('/logout', authenticate, async (req, res) => {
 });
 
 router.get('/users', authenticate, authorize('admin'), async (req, res) => {
-  const users = await User.find({}).select('fullName email role active lastLoginAt createdAt').sort({ createdAt: -1 }).lean();
+  const users = await User.find({})
+    .select('fullName email role active warehousePermissions lastLoginAt createdAt')
+    .sort({ createdAt: -1 })
+    .lean();
   res.json(users.map(user => ({ ...user, id: String(user._id), _id: undefined })));
 });
 
 router.post('/users', authenticate, authorize('admin'), async (req, res) => {
   try {
     const { fullName, email, password, role } = req.body || {};
-    const allowedRoles = ['manager', 'warehouse', 'production'];
+    const allowedRoles = ['cs', 'fop', 'warehouse_keeper'];
     if (typeof fullName !== 'string' || fullName.trim().length < 2 || fullName.trim().length > 120) {
       return res.status(400).json({ error: 'Họ tên phải từ 2 đến 120 ký tự.' });
     }
@@ -150,8 +159,11 @@ router.post('/users', authenticate, authorize('admin'), async (req, res) => {
     if (!allowedRoles.includes(role)) return res.status(400).json({ error: 'Vai trò không hợp lệ.' });
 
     const user = await User.create({
-      fullName: fullName.trim(), email: email.trim().toLowerCase(),
-      passwordHash: await hashPassword(password), role, createdBy: req.user._id
+      fullName: fullName.trim(),
+      email: email.trim().toLowerCase(),
+      passwordHash: await hashPassword(password),
+      role,
+      createdBy: req.user._id
     });
     await audit(req, 'auth.user_created', { targetUserId: String(user._id), role });
     res.status(201).json({ user: publicUser(user) });
@@ -175,7 +187,7 @@ router.patch('/users/:id', authenticate, authorize('admin'), async (req, res) =>
       if (activeAdmins <= 1) return res.status(400).json({ error: 'Không thể khóa hoặc hạ quyền Admin hoạt động cuối cùng.' });
     }
     if (role !== undefined) {
-      if (!['admin', 'manager', 'warehouse', 'production'].includes(role)) return res.status(400).json({ error: 'Vai trò không hợp lệ.' });
+      if (!['admin', 'cs', 'fop', 'warehouse_keeper'].includes(role)) return res.status(400).json({ error: 'Vai trò không hợp lệ.' });
       target.role = role;
     }
     if (active !== undefined) {

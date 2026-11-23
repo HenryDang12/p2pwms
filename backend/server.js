@@ -8,6 +8,9 @@ const Job = require('./models/Job');
 const Asset = require('./models/Asset');
 const AuditLog = require('./models/AuditLog');
 const Stocktake = require('./models/Stocktake');
+const User = require('./models/User');
+const Warehouse = require('./models/Warehouse');
+const Notification = require('./models/Notification');
 const authRoutes = require('./routes/auth.routes');
 const { authenticate, authorize } = require('./middleware/auth');
 
@@ -53,6 +56,49 @@ function writeAudit(req, action, resourceType, resourceId, details = {}) {
   }).catch(err => console.error('Không ghi được audit log:', err.message));
 }
 
+async function createNotification({ recipientIds = [], type, title, message, metadata = {} }) {
+  const uniqueIds = [...new Set(recipientIds.filter(Boolean).map(String))];
+  if (!uniqueIds.length) return null;
+  return Notification.create({
+    recipients: uniqueIds.map(userId => ({ userId, isRead: false, readAt: null })),
+    type,
+    title,
+    message,
+    metadata
+  }).catch(err => console.error('Không gửi được thông báo:', err.message));
+}
+
+function hasWarehouseAction(user, warehouse, action) {
+  if (!user || !warehouse) return false;
+  if (user.role === 'admin') return true;
+  if (user.role === 'cs' && String(warehouse.createdBy) === String(user._id)) return true;
+  const perms = Array.isArray(user.warehousePermissions) ? user.warehousePermissions : [];
+  const matched = perms.find(item => String(item.warehouseId) === String(warehouse._id));
+  return Boolean(matched && Array.isArray(matched.actions) && matched.actions.includes(action));
+}
+
+async function resolveWarehouseForAction(req, action) {
+  const rawWarehouseId = req.body?.warehouseId || req.query?.warehouseId || null;
+  if (!rawWarehouseId) {
+    if (req.user?.role === 'admin') return { warehouse: null };
+    return { error: 'Vui lòng chọn bãi kho (warehouseId) trước khi thao tác.', status: 400 };
+  }
+  if (!mongoose.isValidObjectId(rawWarehouseId)) {
+    return { error: 'ID bãi kho không hợp lệ.', status: 400 };
+  }
+  const warehouse = await Warehouse.findById(rawWarehouseId);
+  if (!warehouse) {
+    return { error: 'Không tìm thấy bãi kho.', status: 404 };
+  }
+  if (warehouse.approvalStatus !== 'approved') {
+    return { error: 'Bãi kho chưa được Admin duyệt hoạt động.', status: 403 };
+  }
+  if (!hasWarehouseAction(req.user, warehouse, action)) {
+    return { error: `Bạn chưa được CS cấp quyền ${action} tại bãi kho "${warehouse.name}".`, status: 403 };
+  }
+  return { warehouse };
+}
+
 app.get('/', (req, res) => {
   res.send('P2P WMS API is running. Authentication is required for warehouse endpoints.');
 });
@@ -66,10 +112,250 @@ app.get('/health', (req, res) => {
 
 app.use('/api/auth', authRoutes);
 
-// Tất cả API nghiệp vụ kho yêu cầu đăng nhập.
+// ==========================================
+// QUẢN LÝ BÃI KHO & PHÂN QUYỀN FOP / TRỰC KHO
+// ==========================================
+app.get('/api/warehouses', authenticate, async (req, res) => {
+  try {
+    let filter = {};
+    if (req.user.role === 'cs') {
+      filter = { createdBy: req.user._id };
+    } else if (['fop', 'warehouse_keeper'].includes(req.user.role)) {
+      const allowedIds = (req.user.warehousePermissions || []).map(p => p.warehouseId);
+      filter = { _id: { $in: allowedIds }, approvalStatus: 'approved' };
+    }
+    const list = await Warehouse.find(filter)
+      .populate('createdBy', 'fullName email role')
+      .populate('approvedBy', 'fullName email role')
+      .sort({ createdAt: -1 })
+      .lean();
+    return res.json(list);
+  } catch (err) {
+    console.error('GET /api/warehouses:', err.message);
+    return res.status(500).json({ error: 'Không thể tải danh sách bãi kho.' });
+  }
+});
+
+// CS đăng ký / tạo bãi kho mới -> gửi Admin duyệt
+app.post('/api/warehouses', authenticate, authorize('admin', 'cs'), async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const address = String(req.body.rentalInfo?.address || req.body.address || '').trim();
+    if (name.length < 2 || name.length > 200) {
+      return res.status(400).json({ error: 'Tên bãi kho phải từ 2-200 ký tự.' });
+    }
+    if (!address) {
+      return res.status(400).json({ error: 'Địa chỉ bãi kho là bắt buộc.' });
+    }
+
+    const isAdmin = req.user.role === 'admin';
+    const warehouse = await Warehouse.create({
+      name,
+      code: String(req.body.code || '').trim().toUpperCase().slice(0, 60),
+      rentalInfo: {
+        providerName: String(req.body.rentalInfo?.providerName || req.body.providerName || '').trim().slice(0, 200),
+        address: address.slice(0, 300),
+        areaSqm: Number(req.body.rentalInfo?.areaSqm || req.body.areaSqm || 0) || 0,
+        startDate: req.body.rentalInfo?.startDate || null,
+        endDate: req.body.rentalInfo?.endDate || null,
+        contractNote: String(req.body.rentalInfo?.contractNote || req.body.contractNote || '').trim().slice(0, 2000)
+      },
+      approvalStatus: isAdmin ? 'approved' : 'pending',
+      createdBy: req.user._id,
+      approvedBy: isAdmin ? req.user._id : null,
+      approvedAt: isAdmin ? new Date() : null
+    });
+
+    if (!isAdmin) {
+      const admins = await User.find({ role: 'admin', active: true }).select('_id').lean();
+      await createNotification({
+        recipientIds: admins.map(a => a._id),
+        type: 'WAREHOUSE_PENDING',
+        title: `Chờ duyệt bãi kho "${warehouse.name}"`,
+        message: `CS ${req.user.fullName} (${req.user.email}) đã đăng ký bãi kho "${warehouse.name}" chờ Admin duyệt.`,
+        metadata: {
+          warehouseId: warehouse._id,
+          actorId: req.user._id,
+          actorName: req.user.fullName,
+          actorRole: req.user.role
+        }
+      });
+    }
+
+    await writeAudit(req, 'warehouse.created', 'warehouse', warehouse._id, { name: warehouse.name, approvalStatus: warehouse.approvalStatus });
+    return res.status(201).json(warehouse);
+  } catch (err) {
+    console.error('POST /api/warehouses:', err.message);
+    return res.status(400).json({ error: 'Không thể tạo bãi kho.' });
+  }
+});
+
+// Admin duyệt hoặc từ chối bãi kho
+app.patch('/api/warehouses/:id/approval', authenticate, authorize('admin'), async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'ID bãi kho không hợp lệ.' });
+    }
+    const approvalStatus = req.body.approvalStatus;
+    if (!['approved', 'rejected'].includes(approvalStatus)) {
+      return res.status(400).json({ error: 'Trạng thái duyệt không hợp lệ.' });
+    }
+    const rejectReason = approvalStatus === 'rejected' ? String(req.body.rejectReason || '').trim().slice(0, 1000) : '';
+
+    const warehouse = await Warehouse.findByIdAndUpdate(
+      req.params.id,
+      {
+        approvalStatus,
+        approvedBy: req.user._id,
+        approvedAt: new Date(),
+        rejectReason
+      },
+      { new: true }
+    );
+    if (!warehouse) return res.status(404).json({ error: 'Không tìm thấy bãi kho.' });
+
+    await createNotification({
+      recipientIds: [warehouse.createdBy],
+      type: approvalStatus === 'approved' ? 'WAREHOUSE_APPROVED' : 'WAREHOUSE_REJECTED',
+      title: approvalStatus === 'approved' ? `Bãi kho "${warehouse.name}" đã được duyệt` : `Bãi kho "${warehouse.name}" bị từ chối`,
+      message: approvalStatus === 'approved'
+        ? `Admin ${req.user.fullName} đã duyệt bãi kho "${warehouse.name}". Bạn có thể cấp quyền cho FOP và người trực kho.`
+        : `Bãi kho "${warehouse.name}" bị từ chối. Lý do: ${rejectReason || 'Không có lý do'}.`,
+      metadata: {
+        warehouseId: warehouse._id,
+        actorId: req.user._id,
+        actorName: req.user.fullName,
+        actorRole: req.user.role
+      }
+    });
+
+    await writeAudit(req, 'warehouse.approval', 'warehouse', warehouse._id, { approvalStatus, rejectReason });
+    return res.json(warehouse);
+  } catch (err) {
+    console.error('PATCH /api/warehouses/:id/approval:', err.message);
+    return res.status(400).json({ error: 'Không thể cập nhật trạng thái duyệt bãi kho.' });
+  }
+});
+
+// CS lấy danh sách FOP và người trực kho để cấp quyền
+app.get('/api/warehouse-staff', authenticate, authorize('admin', 'cs'), async (req, res) => {
+  try {
+    const users = await User.find({ role: { $in: ['fop', 'warehouse_keeper'] }, active: true })
+      .select('fullName email role warehousePermissions')
+      .populate('warehousePermissions.warehouseId', 'name approvalStatus')
+      .lean();
+    return res.json(users);
+  } catch (err) {
+    console.error('GET /api/warehouse-staff:', err.message);
+    return res.status(500).json({ error: 'Không thể tải danh sách nhân sự bãi kho.' });
+  }
+});
+
+// CS cấp quyền (import / export / pick) trên bãi kho cho FOP hoặc người trực kho
+app.post('/api/warehouses/:id/permissions', authenticate, authorize('admin', 'cs'), async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id) || !mongoose.isValidObjectId(req.body.targetUserId)) {
+      return res.status(400).json({ error: 'ID bãi kho hoặc tài khoản không hợp lệ.' });
+    }
+    const warehouse = await Warehouse.findById(req.params.id);
+    if (!warehouse) return res.status(404).json({ error: 'Không tìm thấy bãi kho.' });
+    if (warehouse.approvalStatus !== 'approved') {
+      return res.status(400).json({ error: 'Chỉ cấp quyền được trên bãi kho đã được Admin duyệt.' });
+    }
+    if (req.user.role === 'cs' && String(warehouse.createdBy) !== String(req.user._id)) {
+      return res.status(403).json({ error: 'Bạn chỉ được cấp quyền trên bãi kho do mình quản lý.' });
+    }
+
+    const targetUser = await User.findById(req.body.targetUserId);
+    if (!targetUser || !['fop', 'warehouse_keeper'].includes(targetUser.role)) {
+      return res.status(400).json({ error: 'Tài khoản nhận quyền phải là FOP hoặc người trực kho.' });
+    }
+
+    const allowedActions = ['import', 'export', 'pick'];
+    const actions = [...new Set((Array.isArray(req.body.actions) ? req.body.actions : []).filter(a => allowedActions.includes(a)))];
+
+    const idx = targetUser.warehousePermissions.findIndex(p => String(p.warehouseId) === String(warehouse._id));
+    if (idx > -1) {
+      if (!actions.length) {
+        targetUser.warehousePermissions.splice(idx, 1);
+      } else {
+        targetUser.warehousePermissions[idx].actions = actions;
+        targetUser.warehousePermissions[idx].grantedBy = req.user._id;
+        targetUser.warehousePermissions[idx].grantedAt = new Date();
+      }
+    } else if (actions.length) {
+      targetUser.warehousePermissions.push({
+        warehouseId: warehouse._id,
+        actions,
+        grantedBy: req.user._id,
+        grantedAt: new Date()
+      });
+    }
+
+    await targetUser.save();
+    await writeAudit(req, 'warehouse.permission_updated', 'user', targetUser._id, {
+      warehouseId: warehouse._id,
+      warehouseName: warehouse.name,
+      actions
+    });
+    return res.json({ message: 'Đã cập nhật phân quyền bãi kho.', warehousePermissions: targetUser.warehousePermissions });
+  } catch (err) {
+    console.error('POST /api/warehouses/:id/permissions:', err.message);
+    return res.status(400).json({ error: 'Không thể lưu phân quyền bãi kho.' });
+  }
+});
+
+// ==========================================
+// THÔNG BÁO CHO CS QUẢN LÝ BÃI & ADMIN
+// ==========================================
+app.get('/api/notifications', authenticate, async (req, res) => {
+  try {
+    const raw = await Notification.find({ 'recipients.userId': req.user._id })
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean();
+    const notifications = raw.map(doc => {
+      const me = (doc.recipients || []).find(r => String(r.userId) === String(req.user._id));
+      return {
+        _id: doc._id,
+        type: doc.type,
+        title: doc.title,
+        message: doc.message,
+        metadata: doc.metadata,
+        createdAt: doc.createdAt,
+        isRead: Boolean(me?.isRead),
+        readAt: me?.readAt || null
+      };
+    });
+    const unreadCount = notifications.filter(n => !n.isRead).length;
+    return res.json({ unreadCount, notifications });
+  } catch (err) {
+    console.error('GET /api/notifications:', err.message);
+    return res.status(500).json({ error: 'Không thể tải thông báo.' });
+  }
+});
+
+app.patch('/api/notifications/:id/read', authenticate, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'ID thông báo không hợp lệ.' });
+    }
+    await Notification.updateOne(
+      { _id: req.params.id, 'recipients.userId': req.user._id },
+      { $set: { 'recipients.$.isRead': true, 'recipients.$.readAt': new Date() } }
+    );
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('PATCH /api/notifications/:id/read:', err.message);
+    return res.status(400).json({ error: 'Không thể đánh dấu đã đọc.' });
+  }
+});
+
+// ==========================================
+// PHIẾU KHO: NHẬP / XUẤT / LẤY HÀNG
+// ==========================================
 app.use('/api/tickets', authenticate);
 
-// 1. Lấy toàn bộ phiếu kho (mọi tài khoản đăng nhập đều được đọc).
 app.get('/api/tickets', async (req, res) => {
   try {
     if (mongoose.connection.readyState !== 1) {
@@ -83,9 +369,11 @@ app.get('/api/tickets', async (req, res) => {
   }
 });
 
-// 2. Tạo phiếu nhập: Admin, Quản lý, Thủ kho.
-app.post('/api/tickets/inbound', authorize('admin', 'manager', 'warehouse'), async (req, res) => {
+app.post('/api/tickets/inbound', authorize('admin', 'cs', 'fop', 'warehouse_keeper'), async (req, res) => {
   try {
+    const whCheck = await resolveWarehouseForAction(req, 'import');
+    if (whCheck.error) return res.status(whCheck.status).json({ error: whCheck.error });
+
     const quantity = Number(req.body.quantity);
     const sku = String(req.body.sku || '').trim().toUpperCase();
     const itemName = String(req.body.itemName || '').trim();
@@ -99,6 +387,7 @@ app.post('/api/tickets/inbound', authorize('admin', 'manager', 'warehouse'), asy
     const ticketCode = `IN-${2026001 + count}`;
     const newTicket = new Ticket({
       ticketCode,
+      warehouseId: whCheck.warehouse?._id || null,
       sku,
       itemName,
       unit: String(req.body.unit || 'Cái').slice(0, 40),
@@ -119,7 +408,31 @@ app.post('/api/tickets/inbound', authorize('admin', 'manager', 'warehouse'), asy
     });
 
     await newTicket.save();
-    await writeAudit(req, 'ticket.inbound_created', 'ticket', newTicket._id, { ticketCode, sku, quantity });
+    await writeAudit(req, 'ticket.inbound_created', 'ticket', newTicket._id, {
+      ticketCode,
+      sku,
+      quantity,
+      warehouseId: whCheck.warehouse?._id || null
+    });
+
+    if (whCheck.warehouse) {
+      const admins = await User.find({ role: 'admin', active: true }).select('_id').lean();
+      await createNotification({
+        recipientIds: [whCheck.warehouse.createdBy, ...admins.map(a => a._id)],
+        type: 'STOCK_ACTION',
+        title: `[NHẬP HÀNG] ${whCheck.warehouse.name} - ${ticketCode}`,
+        message: `${req.user.fullName} (${req.user.role}) đã nhập ${quantity} ${newTicket.unit} [${sku} - ${itemName}] tại bãi "${whCheck.warehouse.name}".`,
+        metadata: {
+          warehouseId: whCheck.warehouse._id,
+          transactionId: newTicket._id,
+          actionType: 'import',
+          actorId: req.user._id,
+          actorName: req.user.fullName,
+          actorRole: req.user.role
+        }
+      });
+    }
+
     res.status(201).json(newTicket);
   } catch (err) {
     console.error('Tạo phiếu nhập:', err.message);
@@ -127,8 +440,7 @@ app.post('/api/tickets/inbound', authorize('admin', 'manager', 'warehouse'), asy
   }
 });
 
-// 3. Xuất kho: chỉ Admin, Quản lý, Thủ kho được xác nhận giao dịch thực tế.
-app.post('/api/tickets/:id/outbound', authorize('admin', 'manager', 'warehouse'), async (req, res) => {
+app.post('/api/tickets/:id/outbound', authorize('admin', 'cs', 'fop', 'warehouse_keeper'), async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: 'ID phiếu kho không hợp lệ.' });
     const exportQty = Number(req.body.quantity);
@@ -136,6 +448,17 @@ app.post('/api/tickets/:id/outbound', authorize('admin', 'manager', 'warehouse')
     if (receiverName.length < 2) return res.status(400).json({ error: 'Cần ghi rõ người nhận hàng để xác nhận bàn giao.' });
     if (req.body.receiverConfirmed !== true) return res.status(400).json({ error: 'Người nhận phải xác nhận đã nhận bàn giao.' });
     if (!Number.isFinite(exportQty) || exportQty <= 0) return res.status(400).json({ error: 'Số lượng xuất phải lớn hơn 0.' });
+
+    const existingTicket = await Ticket.findById(req.params.id).lean();
+    if (!existingTicket) return res.status(404).json({ error: 'Không tìm thấy phiếu kho.' });
+
+    const effectiveWarehouseId = req.body.warehouseId || existingTicket.warehouseId || null;
+    if (effectiveWarehouseId) {
+      req.body.warehouseId = effectiveWarehouseId;
+    }
+    const actionName = req.body.actionMode === 'pick' ? 'pick' : 'export';
+    const whCheck = await resolveWarehouseForAction(req, actionName);
+    if (whCheck.error) return res.status(whCheck.status).json({ error: whCheck.error });
 
     const jobId = req.body.jobId || null;
     let job = null;
@@ -152,7 +475,6 @@ app.post('/api/tickets/:id/outbound', authorize('admin', 'manager', 'warehouse')
       if (Number(req.body.quantity) !== assetIds.length) return res.status(400).json({ error: 'Với thiết bị quản lý theo mã riêng, số lượng xuất phải bằng số thiết bị chọn.' });
     }
 
-    // Atomic conditional update prevents concurrent requests from exporting more than the remaining quantity.
     const ticket = await Ticket.findOneAndUpdate(
       {
         _id: req.params.id,
@@ -164,21 +486,28 @@ app.post('/api/tickets/:id/outbound', authorize('admin', 'manager', 'warehouse')
         }
       },
       {
+        $set: { warehouseId: whCheck.warehouse?._id || existingTicket.warehouseId || null },
         $inc: { totalExportedQuantity: exportQty },
-        $push: { exportLogs: {
-          quantity: exportQty,
-          condition: String(req.body.condition || 'Tốt').slice(0, 100),
-          receiverDepartment: String(req.body.receiverDepartment || 'Vận hành').slice(0, 120),
-          receiverName: receiverName.slice(0, 120),
-          receiverConfirmed: true,
-          receiverConfirmedAt: new Date(),
-          executor: req.user.fullName,
-          transportUnit: String(req.body.transportUnit || '').slice(0, 120),
-          note: String(req.body.note || '').slice(0, 2000),
-          photoUrl: typeof req.body.photoUrl === 'string' ? req.body.photoUrl : undefined,
-          jobId: job?._id || null, jobCode: job?.jobCode || String(req.body.jobCode || '').slice(0, 80),
-          jobName: job?.name || String(req.body.jobName || '').slice(0, 200), assetIds
-        } }
+        $push: {
+          exportLogs: {
+            quantity: exportQty,
+            condition: String(req.body.condition || 'Tốt').slice(0, 100),
+            receiverDepartment: String(req.body.receiverDepartment || 'Vận hành').slice(0, 120),
+            receiverName: receiverName.slice(0, 120),
+            receiverConfirmed: true,
+            receiverConfirmedAt: new Date(),
+            executor: req.user.fullName,
+            performedBy: req.user._id,
+            performedByRole: req.user.role,
+            transportUnit: String(req.body.transportUnit || '').slice(0, 120),
+            note: String(req.body.note || '').slice(0, 2000),
+            photoUrl: typeof req.body.photoUrl === 'string' ? req.body.photoUrl : undefined,
+            jobId: job?._id || null,
+            jobCode: job?.jobCode || String(req.body.jobCode || '').slice(0, 80),
+            jobName: job?.name || String(req.body.jobName || '').slice(0, 200),
+            assetIds
+          }
+        }
       },
       { new: true, runValidators: true }
     );
@@ -200,7 +529,31 @@ app.post('/api/tickets/:id/outbound', authorize('admin', 'manager', 'warehouse')
       ? 'Đã xuất hết'
       : 'Đã xuất kho một phần';
     await ticket.save();
-    await writeAudit(req, 'ticket.outbound_created', 'ticket', ticket._id, { ticketCode: ticket.ticketCode, quantity: exportQty });
+    await writeAudit(req, 'ticket.outbound_created', 'ticket', ticket._id, {
+      ticketCode: ticket.ticketCode,
+      quantity: exportQty,
+      warehouseId: ticket.warehouseId || null
+    });
+
+    if (whCheck.warehouse) {
+      const admins = await User.find({ role: 'admin', active: true }).select('_id').lean();
+      const label = actionName === 'pick' ? 'LẤY HÀNG' : 'XUẤT HÀNG';
+      await createNotification({
+        recipientIds: [whCheck.warehouse.createdBy, ...admins.map(a => a._id)],
+        type: 'STOCK_ACTION',
+        title: `[${label}] ${whCheck.warehouse.name} - ${ticket.ticketCode}`,
+        message: `${req.user.fullName} (${req.user.role}) đã ${label.toLowerCase()} ${exportQty} ${ticket.unit} [${ticket.sku} - ${ticket.itemName}] tại bãi "${whCheck.warehouse.name}".`,
+        metadata: {
+          warehouseId: whCheck.warehouse._id,
+          transactionId: ticket._id,
+          actionType: actionName,
+          actorId: req.user._id,
+          actorName: req.user.fullName,
+          actorRole: req.user.role
+        }
+      });
+    }
+
     res.json(ticket);
   } catch (err) {
     console.error('Xuất kho:', err.message);
@@ -208,8 +561,7 @@ app.post('/api/tickets/:id/outbound', authorize('admin', 'manager', 'warehouse')
   }
 });
 
-// 4. Chỉnh sửa: chỉ Admin/Quản lý. Không cho sửa các trường hệ thống tùy ý.
-app.put('/api/tickets/:id', authorize('admin', 'manager'), async (req, res) => {
+app.put('/api/tickets/:id', authorize('admin', 'cs'), async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: 'ID phiếu kho không hợp lệ.' });
     const { exportLogIndex, outboundUpdate, ...updateData } = req.body || {};
@@ -221,7 +573,6 @@ app.put('/api/tickets/:id', authorize('admin', 'manager'), async (req, res) => {
       if (!Number.isInteger(index) || index < 0 || !ticket.exportLogs[index]) {
         return res.status(400).json({ error: 'Đợt xuất kho không hợp lệ.' });
       }
-      // Quantities and executor cannot be changed through this endpoint because that would rewrite stock history.
       const allowed = ['condition', 'receiverDepartment', 'receiverName', 'transportUnit', 'note', 'photoUrl'];
       for (const key of allowed) {
         if (outboundUpdate && Object.prototype.hasOwnProperty.call(outboundUpdate, key)) {
@@ -248,7 +599,6 @@ app.put('/api/tickets/:id', authorize('admin', 'manager'), async (req, res) => {
   }
 });
 
-// 5. Xóa phiếu: chỉ Admin. Xóa được ghi nhật ký audit.
 app.delete('/api/tickets/:id', authorize('admin'), async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: 'ID phiếu kho không hợp lệ.' });
@@ -263,12 +613,12 @@ app.delete('/api/tickets/:id', authorize('admin'), async (req, res) => {
   }
 });
 
-// Job/Event: mọi tài khoản đăng nhập xem được; tạo/sửa chỉ Admin, Quản lý, Production.
+// Job/Event: mọi tài khoản đăng nhập xem được; tạo/sửa chỉ Admin, CS, FOP.
 app.get('/api/jobs', authenticate, async (req, res) => {
   try { const jobs = await Job.find({}).sort({ startDate: -1, createdAt: -1 }).lean(); res.json(jobs); }
   catch (err) { res.status(500).json({ error: 'Không thể tải danh sách Job/Event.' }); }
 });
-app.post('/api/jobs', authenticate, authorize('admin', 'manager', 'production'), async (req, res) => {
+app.post('/api/jobs', authenticate, authorize('admin', 'cs', 'fop'), async (req, res) => {
   try {
     const jobCode = String(req.body.jobCode || '').trim().toUpperCase();
     const name = String(req.body.name || '').trim();
@@ -278,7 +628,7 @@ app.post('/api/jobs', authenticate, authorize('admin', 'manager', 'production'),
     await writeAudit(req, 'job.created', 'job', job._id, { jobCode, name }); res.status(201).json(job);
   } catch (err) { res.status(err.code === 11000 ? 409 : 400).json({ error: err.code === 11000 ? 'Mã Job đã tồn tại.' : 'Không thể tạo Job/Event.' }); }
 });
-app.patch('/api/jobs/:id', authenticate, authorize('admin', 'manager'), async (req, res) => {
+app.patch('/api/jobs/:id', authenticate, authorize('admin', 'cs'), async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: 'ID Job không hợp lệ.' });
     const job = await Job.findById(req.params.id); if (!job) return res.status(404).json({ error: 'Không tìm thấy Job.' });
@@ -296,7 +646,7 @@ app.get('/api/assets', authenticate, async (req, res) => {
   try { const assets = await Asset.find({}).populate('currentJob', 'jobCode name status').populate('returnLogs.executorId', 'fullName email').sort({ createdAt: -1 }).lean(); res.json(assets); }
   catch (err) { res.status(500).json({ error: 'Không thể tải danh sách thiết bị.' }); }
 });
-app.post('/api/assets', authenticate, authorize('admin', 'manager', 'warehouse'), async (req, res) => {
+app.post('/api/assets', authenticate, authorize('admin', 'cs', 'fop', 'warehouse_keeper'), async (req, res) => {
   try {
     const assetCode = String(req.body.assetCode || '').trim().toUpperCase();
     const name = String(req.body.name || '').trim(); const sku = String(req.body.sku || '').trim().toUpperCase();
@@ -306,7 +656,7 @@ app.post('/api/assets', authenticate, authorize('admin', 'manager', 'warehouse')
     await writeAudit(req, 'asset.created', 'asset', asset._id, { assetCode, sku }); res.status(201).json(asset);
   } catch (err) { res.status(err.code === 11000 ? 409 : 400).json({ error: err.code === 11000 ? 'Mã tài sản đã tồn tại.' : 'Không thể tạo thiết bị.' }); }
 });
-app.post('/api/assets/:id/return', authenticate, authorize('admin', 'manager', 'warehouse'), async (req, res) => {
+app.post('/api/assets/:id/return', authenticate, authorize('admin', 'cs', 'fop', 'warehouse_keeper'), async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: 'ID thiết bị không hợp lệ.' });
     const condition = ['Tốt','Cần kiểm tra','Hư hỏng'].includes(req.body.condition) ? req.body.condition : 'Tốt';
@@ -342,7 +692,7 @@ app.get('/api/stocktakes', authenticate, async (req, res) => {
   try { const rows = await Stocktake.find({}).sort({ createdAt: -1 }).limit(100).lean(); res.json(rows); }
   catch (err) { res.status(500).json({ error: 'Không thể tải lịch sử kiểm kê.' }); }
 });
-app.post('/api/stocktakes', authenticate, authorize('admin', 'manager', 'warehouse'), async (req, res) => {
+app.post('/api/stocktakes', authenticate, authorize('admin', 'cs', 'fop', 'warehouse_keeper'), async (req, res) => {
   try {
     const lines = Array.isArray(req.body.lines) ? req.body.lines : [];
     if (!lines.length || lines.length > 2000) return res.status(400).json({ error: 'Biên bản cần có từ 1 đến 2.000 dòng kiểm kê.' });
@@ -360,8 +710,8 @@ app.post('/api/stocktakes', authenticate, authorize('admin', 'manager', 'warehou
   } catch (err) { res.status(400).json({ error: err.message || 'Không thể lưu biên bản kiểm kê.' }); }
 });
 
-// Chỉ Admin/Quản lý xem audit log toàn hệ thống.
-app.get('/api/audit-logs', authenticate, authorize('admin', 'manager'), async (req, res) => {
+// Chỉ Admin/CS xem audit log toàn hệ thống.
+app.get('/api/audit-logs', authenticate, authorize('admin', 'cs'), async (req, res) => {
   try {
     const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
     const logs = await AuditLog.find({}).sort({ createdAt: -1 }).limit(limit).lean();

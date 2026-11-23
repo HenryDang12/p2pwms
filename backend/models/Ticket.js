@@ -9,6 +9,8 @@ const ExportLogSchema = new mongoose.Schema({
   receiverConfirmed: { type: Boolean, default: false },
   receiverConfirmedAt: { type: Date },
   executor: { type: String, required: true },
+  performedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  performedByRole: { type: String, default: '' },
   transportUnit: { type: String },
   photoUrl: { type: String },
   jobId: { type: mongoose.Schema.Types.ObjectId, ref: 'Job', default: null },
@@ -21,10 +23,11 @@ const ExportLogSchema = new mongoose.Schema({
 
 const TicketSchema = new mongoose.Schema({
   ticketCode: { type: String, required: true, unique: true },
+  warehouseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Warehouse', default: null, index: true },
   sku: { type: String, required: true },
   itemName: { type: String, required: true },
   unit: { type: String, default: 'Cái' },
-  
+
   inbound: {
     sku: String,
     quantity: { type: Number, required: true },
